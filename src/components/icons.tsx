@@ -1,0 +1,66 @@
+import {
+  CalendarDays,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  Circle,
+  Download,
+  HelpCircle,
+  History,
+  Home,
+  JapaneseYen,
+  MessageSquare,
+  Minus,
+  MoreVertical,
+  Pencil,
+  Plus,
+  Search,
+  Settings,
+  StickyNote,
+  Trash2,
+  User,
+  type LucideIcon,
+  type LucideProps,
+} from "lucide-react";
+
+const DEFAULT_SIZE = 18;
+
+export function UiIcon({
+  icon: Icon,
+  size = DEFAULT_SIZE,
+  strokeWidth = 1.8,
+  className,
+  ...props
+}: LucideProps & { icon: LucideIcon }) {
+  return <Icon size={size} strokeWidth={strokeWidth} className={className} aria-hidden="true" {...props} />;
+}
+
+export const Icons = {
+  Brand: (props: LucideProps) => <UiIcon icon={CalendarDays} {...props} />,
+  Home: (props: LucideProps) => <UiIcon icon={Home} {...props} />,
+  Shift: (props: LucideProps) => <UiIcon icon={CalendarDays} {...props} />,
+  Goal: (props: LucideProps) => <UiIcon icon={Settings} {...props} />,
+  Master: (props: LucideProps) => <UiIcon icon={User} {...props} />,
+  Message: (props: LucideProps) => <UiIcon icon={MessageSquare} {...props} />,
+  Support: (props: LucideProps) => <UiIcon icon={HelpCircle} {...props} />,
+  Download: (props: LucideProps) => <UiIcon icon={Download} {...props} />,
+  Settings: (props: LucideProps) => <UiIcon icon={Settings} {...props} />,
+  Pencil: (props: LucideProps) => <UiIcon icon={Pencil} {...props} />,
+  Trash: (props: LucideProps) => <UiIcon icon={Trash2} {...props} />,
+  Check: (props: LucideProps) => <UiIcon icon={Check} {...props} />,
+  Yen: (props: LucideProps) => <UiIcon icon={JapaneseYen} {...props} />,
+  History: (props: LucideProps) => <UiIcon icon={History} {...props} />,
+  Note: (props: LucideProps) => <UiIcon icon={StickyNote} {...props} />,
+  Dot: (props: LucideProps) => <UiIcon icon={Circle} {...props} />,
+  Plus: (props: LucideProps) => <UiIcon icon={Plus} {...props} />,
+  Minus: (props: LucideProps) => <UiIcon icon={Minus} {...props} />,
+  Search: (props: LucideProps) => <UiIcon icon={Search} {...props} />,
+  More: (props: LucideProps) => <UiIcon icon={MoreVertical} {...props} />,
+  ChevronDown: (props: LucideProps) => <UiIcon icon={ChevronDown} {...props} />,
+  ChevronLeft: (props: LucideProps) => <UiIcon icon={ChevronLeft} {...props} />,
+  ChevronRight: (props: LucideProps) => <UiIcon icon={ChevronRight} {...props} />,
+  ChevronUp: (props: LucideProps) => <UiIcon icon={ChevronUp} {...props} />,
+  Calendar: (props: LucideProps) => <UiIcon icon={CalendarDays} {...props} />,
+};
