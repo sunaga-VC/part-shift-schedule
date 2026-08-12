@@ -24,6 +24,7 @@ import {
   getGoalBlocksForDate,
   getGoalDepartmentLabel,
 } from "@/lib/shift/goal";
+import { getGoalMemosForDate } from "@/lib/shift/goalMemos";
 import { isAttendanceStatus } from "@/lib/shift/status";
 import {
   buildGoalBlockIconDisplays,
@@ -554,10 +555,14 @@ export function AdminBoard() {
       departments.map((department) => [department, departmentMinutesToHoursInput(requiredByDepartment[department] ?? 0)])
     );
     const saved = state.requiredShifts.find((s) => s.date === date);
+    const memoText = getGoalMemosForDate(state.goalMemos, date)
+      .map((memo) => memo.body.trim())
+      .filter(Boolean)
+      .join("\n");
     setRequiredEditor({
       date,
       departmentHours,
-      note: saved?.note ?? "",
+      note: saved?.note?.trim() ? saved.note : memoText,
     });
   };
 
@@ -680,6 +685,8 @@ export function AdminBoard() {
                           : []
                       ),
                     ];
+                    const dayMemos = getGoalMemosForDate(state.goalMemos, date);
+                    const dayRequiredNote = state.requiredShifts.find((shift) => shift.date === date)?.note?.trim() ?? "";
                     return (
                       <div
                         key={date}
@@ -689,16 +696,24 @@ export function AdminBoard() {
                           setViewMode("day");
                         }}
                       >
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "flex-start",
-                            gap: 6,
-                            width: "100%",
-                          }}
-                        >
-                          <div className="day-num">{formatDateShort(date)}</div>
+                        <div className="day-cell-top">
+                          <div className="day-cell-date-line">
+                            <div className="day-num">{formatDateShort(date)}</div>
+                            {dayMemos.length > 0 ? (
+                              <div className="day-cell-memos">
+                                {dayMemos.map((memo) => (
+                                  <span key={memo.id} className="day-cell-memo" title={memo.body}>
+                                    {memo.body}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null}
+                            {dayRequiredNote ? (
+                              <span className="day-cell-required-note" title={dayRequiredNote}>
+                                {dayRequiredNote}
+                              </span>
+                            ) : null}
+                          </div>
                           <button
                             type="button"
                             className="btn day-cell-edit-btn"
@@ -946,7 +961,9 @@ export function AdminBoard() {
                 </div>
               ))}
             </div>
-            {required?.note ? <span className="gantt-headline-note">備考: {required.note}</span> : null}
+            {required?.note ? (
+              <span className="gantt-headline-note">備考: {required.note}</span>
+            ) : null}
           </div>
         </div>
       </section>

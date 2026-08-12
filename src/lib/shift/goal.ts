@@ -75,7 +75,15 @@ export function countGoalIcons(blocks: GoalBlockSlots): number {
 
 /** departments テーブル（または state.departments）に登録済みのものだけを返す（本部は除外） */
 export function getGoalDisplayDepartments(departments: string[]): string[] {
-  return departments.filter((department) => Boolean(department?.trim()) && department.trim() !== "本部");
+  return departments
+    .filter((department) => Boolean(department?.trim()) && department.trim() !== "本部")
+    .slice()
+    .sort((a, b) => {
+      const aFirst = isFixedDepartmentName(a) ? 0 : 1;
+      const bFirst = isFixedDepartmentName(b) ? 0 : 1;
+      if (aFirst !== bFirst) return aFirst - bFirst;
+      return a.localeCompare(b, "ja");
+    });
 }
 
 export function buildGoalRequiredMinutesByDepartment(blocks: GoalBlockSlots): Record<string, number> {

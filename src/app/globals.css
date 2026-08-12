@@ -2128,19 +2128,113 @@ textarea.master-input,
   gap: 6px;
 }
 
+.goal-day-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
 .goal-day-settings-btn {
   border: none;
   background: transparent;
-  padding: 0;
+  padding: 2px;
   font-size: 20px;
   line-height: 1;
   cursor: pointer;
   color: var(--muted);
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
 }
 
 .goal-day-settings-btn:hover {
   color: var(--accent);
+  background: var(--surface-muted);
+}
+
+.goal-day-memo-list {
+  display: grid;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.goal-day-note {
+  margin: 0;
+  padding: 4px 6px;
+  border-radius: 8px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.goal-memo-section {
+  gap: 12px;
+}
+
+.goal-memo-list {
+  display: grid;
+  gap: 8px;
+}
+
+.goal-memo-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-muted);
+}
+
+.goal-memo-item-main {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.goal-memo-body {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.goal-memo-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  font-size: 12px;
+}
+
+.goal-memo-item-actions {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.goal-memo-modal {
+  width: min(520px, 100%);
+}
+
+.goal-memo-form {
+  max-width: none;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.goal-memo-form .staff-form-span {
+  grid-column: 1 / -1;
 }
 
 .goal-repeat-modal {
@@ -3283,6 +3377,53 @@ textarea.master-input,
   padding: 18px 20px 22px;
 }
 
+.admin-board-page .day-cell-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.admin-board-page .day-cell-date-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.admin-board-page .day-cell-memos {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.admin-board-page .day-cell-memo {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.25;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+.admin-board-page .day-cell-required-note {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--accent);
+  word-break: break-word;
+}
+
 .admin-board-page .day-cell-edit-btn {
   min-height: 28px;
   min-width: 28px;
@@ -3293,6 +3434,7 @@ textarea.master-input,
   background: var(--surface);
   box-shadow: var(--shadow-sm);
   color: var(--muted);
+  flex-shrink: 0;
 }
 
 .admin-board-page .day-cell-edit-btn:hover {

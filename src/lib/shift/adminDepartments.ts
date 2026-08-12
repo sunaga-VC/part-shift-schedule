@@ -1,13 +1,24 @@
 import type { Staff } from "@/lib/shift/types";
+import { isFixedDepartmentName } from "@/lib/shift/goal";
 
 /** UI・権限判定から除外する旧「本部」 */
 export function isHeadquartersDepartment(name: string): boolean {
   return name.trim() === "本部";
 }
 
-/** シフト調整などで扱う所属一覧（本部を除く） */
+function compareDepartmentsForDisplay(a: string, b: string): number {
+  const aFirst = isFixedDepartmentName(a) ? 0 : 1;
+  const bFirst = isFixedDepartmentName(b) ? 0 : 1;
+  if (aFirst !== bFirst) return aFirst - bFirst;
+  return a.localeCompare(b, "ja");
+}
+
+/** シフト調整などで扱う所属一覧（本部を除く）。リクルーティングを先頭にする */
 export function listOperableDepartmentNames(departments: string[]): string[] {
-  return departments.filter((department) => Boolean(department?.trim()) && !isHeadquartersDepartment(department));
+  return departments
+    .filter((department) => Boolean(department?.trim()) && !isHeadquartersDepartment(department))
+    .slice()
+    .sort(compareDepartmentsForDisplay);
 }
 
 /**
@@ -20,7 +31,10 @@ export function getManagedDepartmentsForAdmin(
 ): string[] {
   if (!admin || admin.role !== "admin") return [];
   const allowed = new Set(listOperableDepartmentNames(departments));
-  return (admin.managedTeams ?? []).filter((team) => allowed.has(team));
+  return (admin.managedTeams ?? [])
+    .filter((team) => allowed.has(team))
+    .slice()
+    .sort(compareDepartmentsForDisplay);
 }
 
 export function canOperateDepartment(

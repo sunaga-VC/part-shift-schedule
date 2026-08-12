@@ -165,7 +165,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         ) : (
           <div className="user-switch sidebar-switch">
-            <span className="muted">Supabase ログイン中</span>
             <div className="muted" style={{ fontSize: 12 }}>
               {getStaffDisplayName(currentUser)}
             </div>

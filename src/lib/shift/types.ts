@@ -144,11 +144,32 @@ export interface HomeMessage {
   team: string;
 }
 
+/** 目安設定の備考（開始日＋繰り返し条件でカレンダー表示） */
+export interface GoalMemo {
+  id: string;
+  body: string;
+  /** 表示開始日（繰り返しの基準日） */
+  startDate: string;
+  /** 期限（開始日＋期間から算出して保存） */
+  endDate: string;
+  /** daily | weekdays | monthly */
+  frequency: "daily" | "weekdays" | "monthly";
+  /** 表示する曜日（JS getDay: 1=月…5=金）。frequency=weekdays で使用 */
+  weekdays: number[];
+  /** 開始日から何か月間表示するか */
+  repeatMonths: number;
+  monthlyMode: "single" | "range";
+  monthDay: number;
+  monthDayStart: number;
+  monthDayEnd: number;
+}
+
 export interface AppState {
   staffList: Staff[];
   departments: string[];
   period: ShiftPeriod;
   goalBlocksByDate: Record<string, [string[], string[], string[], string[]]>;
+  goalMemos: GoalMemo[];
   desiredShifts: DesiredShift[];
   confirmedShifts: ConfirmedShift[];
   requiredShifts: RequiredShiftCount[];

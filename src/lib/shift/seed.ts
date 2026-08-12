@@ -320,6 +320,7 @@ export function createInitialState(): AppState {
     departments: defaultDepartments,
     period: defaultPeriod,
     goalBlocksByDate: {},
+    goalMemos: [],
     desiredShifts: initialDesired,
     confirmedShifts: initialConfirmed,
     requiredShifts: initialRequired,

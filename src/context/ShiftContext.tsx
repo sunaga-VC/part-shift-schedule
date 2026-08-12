@@ -40,6 +40,7 @@ import type {
   AppState,
   ConfirmedShift,
   DesiredShift,
+  GoalMemo,
   HomeMessage,
   RequiredShiftCount,
   SalaryRaise,
@@ -157,6 +158,8 @@ type ShiftContextValue = {
   updateGoalBlockDepartment: (date: string, blockIndex: number, iconIndex: number, department: string) => void;
   setGoalBlocksForDate: (date: string, blocks: [string[], string[], string[], string[]]) => void;
   applyGoalBlocksRepeat: (sourceDate: string, rule: GoalRepeatRule) => number;
+  upsertGoalMemo: (memo: Omit<GoalMemo, "id"> & { id?: string }) => void;
+  deleteGoalMemo: (memoId: string) => void;
   updateStaff: (staffId: string, patch: Partial<StaffEditableFields>) => void;
   changeStaffPassword: (
     staffId: string,
@@ -230,6 +233,34 @@ function loadState(): AppState {
               Object.entries(parsedGoalBlocks).map(([date, blocks]) => [date, normalizeGoalBlocks(blocks)])
             )
           : {},
+      goalMemos: Array.isArray(parsed.goalMemos)
+        ? parsed.goalMemos
+            .filter((m): m is GoalMemo => Boolean(m && typeof m === "object" && typeof m.id === "string"))
+            .map((m) => {
+              const raw = m as GoalMemo & Record<string, unknown>;
+              const frequency =
+                raw.frequency === "daily" || raw.frequency === "weekdays" || raw.frequency === "monthly"
+                  ? raw.frequency
+                  : Array.isArray(raw.weekdays) && raw.weekdays.length > 0
+                    ? "weekdays"
+                    : "daily";
+              return {
+                id: String(raw.id),
+                body: String(raw.body ?? ""),
+                startDate: String(raw.startDate ?? ""),
+                endDate: String(raw.endDate ?? ""),
+                frequency,
+                weekdays: Array.isArray(raw.weekdays)
+                  ? raw.weekdays.map((d) => Number(d)).filter((d) => d >= 1 && d <= 5)
+                  : [],
+                repeatMonths: Math.max(1, Number(raw.repeatMonths) || 3),
+                monthlyMode: raw.monthlyMode === "range" ? "range" : "single",
+                monthDay: Math.min(31, Math.max(1, Number(raw.monthDay) || 1)),
+                monthDayStart: Math.min(31, Math.max(1, Number(raw.monthDayStart) || 1)),
+                monthDayEnd: Math.min(31, Math.max(1, Number(raw.monthDayEnd) || 1)),
+              };
+            })
+        : [],
       departments:
         Array.isArray(parsed.departments) && parsed.departments.length > 0
           ? parsed.departments
@@ -541,6 +572,54 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     });
 
     return targetDates.length;
+  }, []);
+
+  const upsertGoalMemo = useCallback((memo: Omit<GoalMemo, "id"> & { id?: string }) => {
+    const body = memo.body.trim();
+    if (!body || !memo.startDate || !memo.endDate) return;
+    const startDate = memo.startDate <= memo.endDate ? memo.startDate : memo.endDate;
+    const endDate = memo.startDate <= memo.endDate ? memo.endDate : memo.startDate;
+    const frequency =
+      memo.frequency === "daily" || memo.frequency === "weekdays" || memo.frequency === "monthly"
+        ? memo.frequency
+        : "daily";
+    const weekdays = [...new Set((memo.weekdays ?? []).filter((d) => d >= 1 && d <= 5))].sort();
+    const next: GoalMemo = {
+      id: memo.id ?? "",
+      body,
+      startDate,
+      endDate,
+      frequency,
+      weekdays: frequency === "weekdays" ? weekdays : [],
+      repeatMonths: Math.max(1, Number(memo.repeatMonths) || 3),
+      monthlyMode: memo.monthlyMode === "range" ? "range" : "single",
+      monthDay: Math.min(31, Math.max(1, Number(memo.monthDay) || 1)),
+      monthDayStart: Math.min(31, Math.max(1, Number(memo.monthDayStart) || 1)),
+      monthDayEnd: Math.min(31, Math.max(1, Number(memo.monthDayEnd) || 1)),
+    };
+
+    setState((prev) => {
+      const list = [...(prev.goalMemos ?? [])];
+      if (memo.id) {
+        const index = list.findIndex((item) => item.id === memo.id);
+        if (index >= 0) {
+          list[index] = { ...next, id: memo.id };
+          return { ...prev, goalMemos: list };
+        }
+      }
+      list.unshift({
+        ...next,
+        id: `goal-memo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      });
+      return { ...prev, goalMemos: list };
+    });
+  }, []);
+
+  const deleteGoalMemo = useCallback((memoId: string) => {
+    setState((prev) => ({
+      ...prev,
+      goalMemos: (prev.goalMemos ?? []).filter((memo) => memo.id !== memoId),
+    }));
   }, []);
 
   const updateStaff = useCallback((staffId: string, patch: Partial<StaffEditableFields>) => {
@@ -1610,6 +1689,8 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     updateGoalBlockDepartment,
     setGoalBlocksForDate,
     applyGoalBlocksRepeat,
+    upsertGoalMemo,
+    deleteGoalMemo,
     updateStaff,
     changeStaffPassword,
     createStaff,

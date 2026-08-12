@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 import { Icons } from "@/components/icons";
 import { useShift } from "@/context/ShiftContext";
 import { listOperableDepartmentNames } from "@/lib/shift/adminDepartments";
-import { formatDateLong, formatDateShort } from "@/lib/shift/dates";
+import { formatDateLong, formatDateShort, toDateKeyJst } from "@/lib/shift/dates";
 import {
   GOAL_BLOCK_TIMES,
   getGoalBlocksForDate,
@@ -13,12 +13,20 @@ import {
   getGoalDisplayDepartments,
 } from "@/lib/shift/goal";
 import {
+  buildGoalMemoFromDraft,
+  formatMemoRepeatLabel,
+  getGoalMemosForDate,
+  getMemoDisplayDates,
+  getMemoRepeatRule,
+} from "@/lib/shift/goalMemos";
+import {
   WORKDAY_OPTIONS,
   clampMonthDay,
   createDefaultRepeatRule,
   getRepeatTargetDates,
   type GoalRepeatRule,
 } from "@/lib/shift/goalRepeat";
+import type { GoalMemo } from "@/lib/shift/types";
 
 type GoalPickerTarget = {
   date: string;
@@ -26,11 +34,35 @@ type GoalPickerTarget = {
   iconIndex: number;
 };
 
+type MemoDraft = {
+  id?: string;
+  body: string;
+  startDate: string;
+  rule: GoalRepeatRule;
+};
+
+function emptyMemoDraft(todayKey: string): MemoDraft {
+  return {
+    body: "",
+    startDate: todayKey,
+    rule: createDefaultRepeatRule(todayKey),
+  };
+}
+
 export function AdminGoalPage() {
-  const { state, updateGoalBlockCount, updateGoalBlockDepartment, applyGoalBlocksRepeat } = useShift();
+  const {
+    state,
+    updateGoalBlockCount,
+    updateGoalBlockDepartment,
+    applyGoalBlocksRepeat,
+    upsertGoalMemo,
+    deleteGoalMemo,
+  } = useShift();
   const [picker, setPicker] = useState<GoalPickerTarget | null>(null);
   const [repeatEditor, setRepeatEditor] = useState<{ sourceDate: string; rule: GoalRepeatRule } | null>(null);
   const [repeatMessage, setRepeatMessage] = useState<string | null>(null);
+  const [memoMessage, setMemoMessage] = useState<string | null>(null);
+  const [memoDraft, setMemoDraft] = useState<MemoDraft | null>(null);
 
   const departments = useMemo(
     () => listOperableDepartmentNames(state.departments),
@@ -65,10 +97,7 @@ export function AdminGoalPage() {
     return groups;
   }, [dates]);
 
-  const todayKey = useMemo(() => {
-    const today = new Date();
-    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-  }, []);
+  const todayKey = useMemo(() => toDateKeyJst(new Date()), []);
 
   const currentWeekIndex = useMemo(
     () => weekGroups.findIndex((group) => group.includes(todayKey)),
@@ -79,6 +108,13 @@ export function AdminGoalPage() {
     if (!repeatEditor) return 0;
     return getRepeatTargetDates(repeatEditor.sourceDate, repeatEditor.rule).length;
   }, [repeatEditor]);
+
+  const memoPreviewCount = useMemo(() => {
+    if (!memoDraft) return 0;
+    return getMemoDisplayDates(memoDraft.startDate, memoDraft.rule).length;
+  }, [memoDraft]);
+
+  const goalMemos = state.goalMemos ?? [];
 
   const handleSelectDepartment = (department: string) => {
     if (!picker) return;
@@ -127,6 +163,76 @@ export function AdminGoalPage() {
     }
   };
 
+  const openMemoCreate = () => {
+    setMemoMessage(null);
+    setMemoDraft(emptyMemoDraft(todayKey));
+  };
+
+  const openMemoEdit = (memo: GoalMemo) => {
+    setMemoMessage(null);
+    setMemoDraft({
+      id: memo.id,
+      body: memo.body,
+      startDate: memo.startDate,
+      rule: getMemoRepeatRule(memo),
+    });
+  };
+
+  const updateMemoDraft = (patch: Partial<Omit<MemoDraft, "rule">>) => {
+    setMemoDraft((prev) => (prev ? { ...prev, ...patch } : prev));
+  };
+
+  const updateMemoRule = (patch: Partial<GoalRepeatRule>) => {
+    setMemoDraft((prev) => (prev ? { ...prev, rule: { ...prev.rule, ...patch } } : prev));
+  };
+
+  const toggleMemoWeekday = (weekday: number) => {
+    setMemoDraft((prev) => {
+      if (!prev) return prev;
+      const current = prev.rule.weekdays;
+      const next = current.includes(weekday) ? current.filter((day) => day !== weekday) : [...current, weekday].sort();
+      return { ...prev, rule: { ...prev.rule, weekdays: next.length > 0 ? next : [weekday] } };
+    });
+  };
+
+  const handleSaveMemo = () => {
+    if (!memoDraft) return;
+    if (!memoDraft.body.trim()) {
+      setMemoMessage("備考内容を入力してください。");
+      return;
+    }
+    if (!memoDraft.startDate) {
+      setMemoMessage("表示開始日を指定してください。");
+      return;
+    }
+    if (memoDraft.rule.repeatMonths < 1) {
+      setMemoMessage("期間は1ヶ月以上を指定してください。");
+      return;
+    }
+    if (memoDraft.rule.frequency === "weekdays" && memoDraft.rule.weekdays.length === 0) {
+      setMemoMessage("曜日を1つ以上選んでください。");
+      return;
+    }
+    if (
+      memoDraft.rule.frequency === "monthly" &&
+      memoDraft.rule.monthlyMode === "range" &&
+      memoDraft.rule.monthDayStart > memoDraft.rule.monthDayEnd
+    ) {
+      setMemoMessage("期間の開始日は終了日以前にしてください。");
+      return;
+    }
+    upsertGoalMemo(
+      buildGoalMemoFromDraft({
+        id: memoDraft.id,
+        body: memoDraft.body,
+        startDate: memoDraft.startDate,
+        rule: memoDraft.rule,
+      })
+    );
+    setMemoDraft(null);
+    setMemoMessage(null);
+  };
+
   return (
     <div className="stack">
       <section className="panel">
@@ -145,6 +251,63 @@ export function AdminGoalPage() {
         {repeatMessage ? <p className="muted" style={{ margin: "12px 0 0" }}>{repeatMessage}</p> : null}
       </section>
 
+      <section className="panel stack goal-memo-section">
+        <div className="actions" style={{ justifyContent: "space-between", marginTop: 0, alignItems: "center" }}>
+          <div className="stack" style={{ gap: 2 }}>
+            <h2 style={{ margin: 0 }}>備考</h2>
+            <p className="muted" style={{ margin: 0 }}>
+              表示開始日と繰り返し条件を決めて、カレンダーの対象日に備考を表示します。
+            </p>
+          </div>
+          <button type="button" className="btn primary btn-action-green" onClick={openMemoCreate}>
+            <Icons.Plus size={16} />
+            備考を追加
+          </button>
+        </div>
+
+        {goalMemos.length === 0 ? (
+          <p className="muted" style={{ margin: 0 }}>
+            まだ備考はありません。
+          </p>
+        ) : (
+          <div className="goal-memo-list">
+            {goalMemos.map((memo) => (
+              <article key={memo.id} className="goal-memo-item">
+                <div className="goal-memo-item-main">
+                  <p className="goal-memo-body">{memo.body}</p>
+                  <div className="goal-memo-meta muted">
+                    <span>
+                      {formatDateShort(memo.startDate)} 〜 {formatDateShort(memo.endDate)}
+                    </span>
+                    <span>{formatMemoRepeatLabel(memo)}</span>
+                  </div>
+                </div>
+                <div className="goal-memo-item-actions">
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={() => openMemoEdit(memo)}
+                    aria-label="備考を編集"
+                    title="編集"
+                  >
+                    <Icons.Pencil size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn danger"
+                    onClick={() => deleteGoalMemo(memo.id)}
+                    aria-label="備考を削除"
+                    title="削除"
+                  >
+                    <Icons.Trash size={14} />
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
       <section className="panel">
         <div className="calendar-scroll">
           <div className="calendar calendar-weekday-header work-calendar goal-calendar-header">
@@ -159,6 +322,7 @@ export function AdminGoalPage() {
               <div className={`calendar-week-row${weekIndex < currentWeekIndex ? " past-week" : ""}`} key={`week-${weekIndex}`}>
                 {group.map((date) => {
                   const blocks = getGoalBlocksForDate(state, date);
+                  const dayMemos = getGoalMemosForDate(goalMemos, date);
                   return (
                     <div key={date} className={`day-cell goal-day-cell${weekIndex < currentWeekIndex ? " past" : ""}`}>
                       <div className="goal-day-head">
@@ -173,6 +337,15 @@ export function AdminGoalPage() {
                           <Icons.Settings size={14} />
                         </button>
                       </div>
+                      {dayMemos.length > 0 ? (
+                        <div className="goal-day-memo-list">
+                          {dayMemos.map((memo) => (
+                            <p key={memo.id} className="goal-day-note" title={memo.body}>
+                              {memo.body}
+                            </p>
+                          ))}
+                        </div>
+                      ) : null}
                       <div className="goal-block-list">
                         {GOAL_BLOCK_TIMES.map((block, index) => {
                           const slots = blocks[index];
@@ -225,6 +398,186 @@ export function AdminGoalPage() {
           </div>
         </div>
       </section>
+
+      {memoDraft ? (
+        <div className="modal-backdrop" onClick={() => setMemoDraft(null)}>
+          <div className="modal-panel goal-memo-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0 }}>{memoDraft.id ? "備考を編集" : "備考を追加"}</h3>
+            <p className="muted" style={{ marginTop: 0 }}>
+              {formatDateLong(memoDraft.startDate)} からの備考を、指定した条件でカレンダーへ表示します。
+            </p>
+            <div className="form-grid goal-memo-form">
+              <label className="staff-form-span">
+                備考
+                <textarea
+                  value={memoDraft.body}
+                  onChange={(e) => updateMemoDraft({ body: e.target.value })}
+                  placeholder="連絡事項・注意点など"
+                  rows={4}
+                  autoFocus
+                />
+              </label>
+              <label>
+                表示開始日
+                <input
+                  type="date"
+                  value={memoDraft.startDate}
+                  onChange={(e) => {
+                    const nextStart = e.target.value;
+                    setMemoDraft((prev) => {
+                      if (!prev) return prev;
+                      if (!nextStart) return { ...prev, startDate: nextStart };
+                      const defaults = createDefaultRepeatRule(nextStart);
+                      return {
+                        ...prev,
+                        startDate: nextStart,
+                        rule: {
+                          ...prev.rule,
+                          monthDay: defaults.monthDay,
+                          monthDayEnd:
+                            prev.rule.monthlyMode === "single" ? defaults.monthDay : prev.rule.monthDayEnd,
+                        },
+                      };
+                    });
+                  }}
+                />
+              </label>
+
+              <fieldset className="goal-repeat-fieldset staff-form-span">
+                <legend>繰り返し</legend>
+                <label className="goal-repeat-option">
+                  <input
+                    type="radio"
+                    name="goal-memo-frequency"
+                    checked={memoDraft.rule.frequency === "daily"}
+                    onChange={() => updateMemoRule({ frequency: "daily" })}
+                  />
+                  <span>毎日（平日）</span>
+                </label>
+                <label className="goal-repeat-option">
+                  <input
+                    type="radio"
+                    name="goal-memo-frequency"
+                    checked={memoDraft.rule.frequency === "weekdays"}
+                    onChange={() => updateMemoRule({ frequency: "weekdays" })}
+                  />
+                  <span>曜日指定</span>
+                </label>
+                <label className="goal-repeat-option">
+                  <input
+                    type="radio"
+                    name="goal-memo-frequency"
+                    checked={memoDraft.rule.frequency === "monthly"}
+                    onChange={() => updateMemoRule({ frequency: "monthly" })}
+                  />
+                  <span>毎月</span>
+                </label>
+              </fieldset>
+
+              {memoDraft.rule.frequency === "weekdays" ? (
+                <div className="goal-repeat-weekdays staff-form-span">
+                  <span className="goal-repeat-weekdays-label">曜日</span>
+                  <div className="goal-repeat-weekday-row">
+                    {WORKDAY_OPTIONS.map(({ value, label }) => (
+                      <label key={value} className="goal-repeat-weekday-chip">
+                        <input
+                          type="checkbox"
+                          checked={memoDraft.rule.weekdays.includes(value)}
+                          onChange={() => toggleMemoWeekday(value)}
+                        />
+                        <span>{label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {memoDraft.rule.frequency === "monthly" ? (
+                <fieldset className="goal-repeat-fieldset staff-form-span">
+                  <legend>毎月の日付</legend>
+                  <label className="goal-repeat-option">
+                    <input
+                      type="radio"
+                      name="goal-memo-monthly-mode"
+                      checked={memoDraft.rule.monthlyMode === "single"}
+                      onChange={() => updateMemoRule({ monthlyMode: "single" })}
+                    />
+                    <span className="goal-repeat-inline-inputs">
+                      <input
+                        type="number"
+                        min={1}
+                        max={31}
+                        value={memoDraft.rule.monthDay}
+                        onChange={(e) =>
+                          updateMemoRule({ monthDay: clampMonthDay(Number(e.target.value), memoDraft.rule.monthDay) })
+                        }
+                      />
+                      <span>日</span>
+                    </span>
+                  </label>
+                  <label className="goal-repeat-option">
+                    <input
+                      type="radio"
+                      name="goal-memo-monthly-mode"
+                      checked={memoDraft.rule.monthlyMode === "range"}
+                      onChange={() => updateMemoRule({ monthlyMode: "range" })}
+                    />
+                    <span className="goal-repeat-inline-inputs">
+                      <input
+                        type="number"
+                        min={1}
+                        max={31}
+                        value={memoDraft.rule.monthDayStart}
+                        onChange={(e) =>
+                          updateMemoRule({
+                            monthDayStart: clampMonthDay(Number(e.target.value), memoDraft.rule.monthDayStart),
+                          })
+                        }
+                      />
+                      <span>日 〜</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={31}
+                        value={memoDraft.rule.monthDayEnd}
+                        onChange={(e) =>
+                          updateMemoRule({
+                            monthDayEnd: clampMonthDay(Number(e.target.value), memoDraft.rule.monthDayEnd),
+                          })
+                        }
+                      />
+                      <span>日</span>
+                    </span>
+                  </label>
+                </fieldset>
+              ) : null}
+
+              <label>
+                期間（か月）
+                <input
+                  type="number"
+                  min={1}
+                  max={24}
+                  value={memoDraft.rule.repeatMonths}
+                  onChange={(e) => updateMemoRule({ repeatMonths: Math.max(1, Number(e.target.value) || 1) })}
+                />
+              </label>
+              <p className="muted staff-form-span" style={{ margin: 0 }}>
+                反映予定: {memoPreviewCount}日
+              </p>
+            </div>
+            {memoMessage ? <p className="badge warn">{memoMessage}</p> : null}
+            <div className="actions" style={{ justifyContent: "flex-end" }}>
+              <button type="button" className="btn primary btn-action-green" onClick={handleSaveMemo}>
+                保存
+              </button>
+              <button type="button" className="btn" onClick={() => setMemoDraft(null)}>
+                キャンセル
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {repeatEditor ? (
         <div className="modal-backdrop" onClick={() => setRepeatEditor(null)}>
@@ -320,7 +673,9 @@ export function AdminGoalPage() {
                         max={31}
                         value={repeatEditor.rule.monthDayStart}
                         onChange={(e) =>
-                          updateRepeatRule({ monthDayStart: clampMonthDay(Number(e.target.value), repeatEditor.rule.monthDayStart) })
+                          updateRepeatRule({
+                            monthDayStart: clampMonthDay(Number(e.target.value), repeatEditor.rule.monthDayStart),
+                          })
                         }
                       />
                       <span>日 〜</span>
@@ -330,7 +685,9 @@ export function AdminGoalPage() {
                         max={31}
                         value={repeatEditor.rule.monthDayEnd}
                         onChange={(e) =>
-                          updateRepeatRule({ monthDayEnd: clampMonthDay(Number(e.target.value), repeatEditor.rule.monthDayEnd) })
+                          updateRepeatRule({
+                            monthDayEnd: clampMonthDay(Number(e.target.value), repeatEditor.rule.monthDayEnd),
+                          })
                         }
                       />
                       <span>日</span>
@@ -339,27 +696,24 @@ export function AdminGoalPage() {
                 </fieldset>
               ) : null}
 
-              <label className="goal-repeat-months-label">
-                期間
-                <span className="goal-repeat-inline-inputs">
-                  <input
-                    type="number"
-                    min={1}
-                    max={24}
-                    value={repeatEditor.rule.repeatMonths}
-                    onChange={(e) => updateRepeatRule({ repeatMonths: Math.max(1, Number(e.target.value) || 1) })}
-                  />
-                  <span>ヶ月</span>
-                </span>
+              <label>
+                期間（か月）
+                <input
+                  type="number"
+                  min={1}
+                  max={24}
+                  value={repeatEditor.rule.repeatMonths}
+                  onChange={(e) => updateRepeatRule({ repeatMonths: Math.max(1, Number(e.target.value) || 1) })}
+                />
               </label>
-
-              <p className="muted goal-repeat-preview">
+              <p className="muted" style={{ margin: 0 }}>
                 反映予定: {repeatPreviewCount}日
               </p>
             </div>
-            <div className="actions" style={{ justifyContent: "flex-end", marginTop: 12 }}>
+            {repeatMessage ? <p className="badge warn">{repeatMessage}</p> : null}
+            <div className="actions" style={{ justifyContent: "flex-end" }}>
               <button type="button" className="btn primary" onClick={handleApplyRepeat}>
-                反映
+                反映する
               </button>
               <button type="button" className="btn" onClick={() => setRepeatEditor(null)}>
                 キャンセル
@@ -371,7 +725,7 @@ export function AdminGoalPage() {
 
       {picker ? (
         <div className="modal-backdrop" onClick={() => setPicker(null)}>
-          <div className="modal-panel goal-department-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
             <h3 style={{ marginTop: 0 }}>所属を選択</h3>
             <p className="muted" style={{ marginTop: 0 }}>
               マスタ管理の所属管理で登録されている所属から選びます。
