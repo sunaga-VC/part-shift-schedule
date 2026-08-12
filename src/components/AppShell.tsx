@@ -21,12 +21,6 @@ const adminBaseLinks = [
 
 const masterLink = { href: "/admin/master", label: "マスタ管理", Icon: Icons.Master };
 
-function adminRoleLabel(permission: "manager" | "general" | "part_time_admin"): string {
-  if (permission === "manager") return "マネージャー";
-  if (permission === "part_time_admin") return "アルバイト管理者";
-  return "一般";
-}
-
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { ready, usingSupabaseAuth, state, currentUser, isAdmin, canManageMaster, setCurrentUserId, resetDemoData } =
@@ -82,10 +76,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     );
   }
 
-  const roleText = isAdmin
-    ? `管理者・${adminRoleLabel(currentUser.adminPermission)}`
-    : "アルバイト";
-
   return (
     <div className={`app-shell${menuOpen ? " menu-open" : ""}`}>
       <header className="mobile-topbar">
@@ -123,10 +113,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </span>
               シフト調整アプリ
             </div>
-            <div className="muted sidebar-user" style={{ fontSize: "0.85rem", marginTop: 4 }}>
-              {getStaffDisplayName(currentUser)}
-              （{roleText}） / {currentUser.team || "未所属"}
-            </div>
             {currentUser.email ? (
               <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>
                 {currentUser.email}
@@ -152,8 +138,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   .filter((s) => s.status === "active")
                   .map((s) => (
                     <option key={s.id} value={s.id}>
-                      {getStaffDisplayName(s)}（
-                      {s.role === "admin" ? `管理者・${adminRoleLabel(s.adminPermission)}` : "アルバイト"}）
+                      {getStaffDisplayName(s)}
                     </option>
                   ))}
               </select>
@@ -172,7 +157,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         )}
 
         <div className="sidebar-menu">
-          <div className="sidebar-menu-title">メニュー</div>
           <nav className="nav sidebar-nav">
             {links.map((link) => {
               const active =
