@@ -190,15 +190,6 @@ textarea {
   padding-top: 12px;
 }
 
-.sidebar-support {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-  font-size: 13px;
-  font-weight: 500;
-}
-
 .sidebar-user {
   font-size: 0.78rem !important;
   line-height: 1.3;

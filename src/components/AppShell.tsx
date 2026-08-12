@@ -183,10 +183,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <button type="button" className="btn" onClick={handleLogout} style={{ width: "100%" }}>
             ログアウト
           </button>
-          <span className="sidebar-support">
-            <Icons.Support size={16} />
-            サポート
-          </span>
         </div>
       </aside>
 
