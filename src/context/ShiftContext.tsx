@@ -460,6 +460,28 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   }, [state, ready, usingSupabaseAuth]);
 
   useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== STORAGE_KEY) return;
+      const next = loadState();
+      setState((prev) => {
+        if (usingSupabaseAuthRef.current) {
+          return {
+            ...prev,
+            ...next,
+            staffList: prev.staffList,
+            departments: prev.departments,
+            currentUserId: prev.currentUserId,
+          };
+        }
+        return next;
+      });
+    };
+
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  useEffect(() => {
     const onHide = () => {
       void flushStaffPersists();
     };
