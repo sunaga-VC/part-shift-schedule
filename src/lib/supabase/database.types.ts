@@ -4,10 +4,10 @@
  */
 
 export type StaffRole = "worker" | "admin";
-export type AdminPermission = "manager" | "general";
+export type AdminPermission = "manager" | "general" | "part_time_admin";
 export type EmploymentStatus = "active" | "inactive";
 export type ShiftPeriodStatus = "draft" | "editing" | "adjusting" | "published";
-export type ConfirmedShiftStatus = "adjusting" | "unconfirmed" | "confirmed";
+export type ConfirmedShiftStatus = "adjusting" | "unconfirmed" | "confirmed" | "remote";
 export type MessageAudience = "all" | "team";
 
 export type Database = {
@@ -40,6 +40,24 @@ export type Database = {
         };
         Relationships: [];
       };
+      staff_managed_departments: {
+        Row: {
+          staff_id: string;
+          department_id: string;
+          created_at: string;
+        };
+        Insert: {
+          staff_id: string;
+          department_id: string;
+          created_at?: string;
+        };
+        Update: {
+          staff_id?: string;
+          department_id?: string;
+          created_at?: string;
+        };
+        Relationships: [];
+      };
       staff_profiles: {
         Row: {
           id: string;
@@ -60,6 +78,7 @@ export type Database = {
           hourly_wage: number;
           email: string;
           google_email: string;
+          note: string;
           created_at: string;
           updated_at: string;
         };
@@ -82,6 +101,7 @@ export type Database = {
           hourly_wage?: number;
           email?: string;
           google_email?: string;
+          note?: string;
           created_at?: string;
           updated_at?: string;
         };
@@ -104,6 +124,7 @@ export type Database = {
           hourly_wage?: number;
           email?: string;
           google_email?: string;
+          note?: string;
           created_at?: string;
           updated_at?: string;
         };
@@ -427,6 +448,8 @@ export type Database = {
     Functions: {
       is_admin: { Args: Record<string, never>; Returns: boolean };
       is_manager: { Args: Record<string, never>; Returns: boolean };
+      is_part_time_admin: { Args: Record<string, never>; Returns: boolean };
+      can_manage_master: { Args: Record<string, never>; Returns: boolean };
     };
     Enums: {
       staff_role: StaffRole;

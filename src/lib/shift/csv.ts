@@ -1,4 +1,5 @@
 import { getStaffFullName } from "@/lib/shift/display";
+import { isAttendanceStatus } from "@/lib/shift/status";
 import type { ConfirmedShift, Staff } from "@/lib/shift/types";
 
 function escapeCsv(value: string): string {
@@ -37,7 +38,7 @@ export function buildShiftExportCsv({ shifts, staffList, dateKeys, departments }
 
   const filtered = shifts.filter((shift) => {
     if (!dateSet.has(shift.date)) return false;
-    if (shift.status !== "confirmed") return false;
+    if (!isAttendanceStatus(shift.status)) return false;
     const staff = staffList.find((s) => s.id === shift.staffId);
     if (!staff || staff.role !== "worker") return false;
     if (!departmentSet.has(staff.team)) return false;

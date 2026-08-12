@@ -1,7 +1,12 @@
 export type StaffRole = "worker" | "admin";
 
-/** 管理者権限。マネージャーのみマスタ管理を利用できる */
-export type AdminPermission = "manager" | "general";
+/**
+ * 管理者権限
+ * - manager: 全権限（管理者アカウント含む）
+ * - part_time_admin: マネージャー相当だが管理者アカウントは不可
+ * - general: シフト調整などは可、マスタ管理不可
+ */
+export type AdminPermission = "manager" | "general" | "part_time_admin";
 
 export type EmploymentStatus = "active" | "inactive";
 
@@ -21,6 +26,11 @@ export interface Staff {
   displayGivenName: boolean;
   iconLabel: string;
   team: string;
+  /**
+   * 管理者がシフト調整（ガント・確定）できる所属（複数）。
+   * アルバイトでは空配列。
+   */
+  managedTeams: string[];
   password: string;
   role: StaffRole;
   /** 管理者向け権限。アルバイトでは参照しない */
@@ -45,6 +55,8 @@ export interface Staff {
   email: string;
   /** Googleカレンダー連携用メールアドレス */
   googleEmail: string;
+  /** 管理用備考 */
+  note: string;
 }
 
 export interface ShiftPeriod {
@@ -75,7 +87,7 @@ export interface ConfirmedShift {
   staffId: string;
   periodId: string;
   date: string;
-  status: "adjusting" | "unconfirmed" | "confirmed";
+  status: "adjusting" | "unconfirmed" | "confirmed" | "remote";
   startTime: string;
   endTime: string;
   breakMinutes: number;

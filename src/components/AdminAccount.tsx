@@ -1,11 +1,13 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { useShift } from "@/context/ShiftContext";
 
 export function AdminAccount() {
-  const { state, updateStaff } = useShift();
+  const { state, updateStaff, changeStaffPassword } = useShift();
   const admin = state.staffList.find((staff) => staff.role === "admin");
+  const [passwordDraft, setPasswordDraft] = useState("");
 
   if (!admin) {
     return (
@@ -39,8 +41,33 @@ export function AdminAccount() {
             <input value={admin.name} onChange={(e) => updateStaff(admin.id, { name: e.target.value })} />
           </label>
           <label>
-            ログインパスワード
-            <input value={admin.password} onChange={(e) => updateStaff(admin.id, { password: e.target.value })} />
+            パスワード変更
+            <div className="password-change-row">
+              <input
+                type="password"
+                value={passwordDraft}
+                onChange={(e) => setPasswordDraft(e.target.value)}
+                placeholder="新しいパスワード（6文字以上）"
+                autoComplete="new-password"
+              />
+              <button
+                type="button"
+                className="btn ghost-sm"
+                onClick={() => {
+                  void (async () => {
+                    const result = await changeStaffPassword(admin.id, passwordDraft);
+                    if (!result.ok) {
+                      window.alert(result.message);
+                      return;
+                    }
+                    setPasswordDraft("");
+                    window.alert("パスワードを更新しました。");
+                  })();
+                }}
+              >
+                変更
+              </button>
+            </div>
           </label>
         </div>
       </section>

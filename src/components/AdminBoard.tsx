@@ -24,6 +24,7 @@ import {
   getGoalBlocksForDate,
   getGoalDepartmentLabel,
 } from "@/lib/shift/goal";
+import { isAttendanceStatus } from "@/lib/shift/status";
 import {
   buildGoalBlockIconDisplays,
   buildGoalBlockIconKey,
@@ -34,13 +35,48 @@ import {
   transferGoalIconFuel,
   type GoalBlockIconKind,
 } from "@/lib/shift/goalBlockIcons";
+import { canOperateDepartment, getManagedDepartmentsForAdmin, listOperableDepartmentNames } from "@/lib/shift/adminDepartments";
 import { buildWeeklyStaffSummary } from "@/lib/shift/summary";
 import { formatConfirmedWithDiff, formatMinutes, formatShiftSummary, formatTimeRange, toMinutes } from "@/lib/shift/time";
+import type { ConfirmedShift } from "@/lib/shift/types";
+
+/** 在宅用: 時間帯の円弧だけを点線で描く（終了以降は描画しない） */
+function buildRemoteRingDashArray(spanPct: number): string {
+  const span = Math.max(0, Math.min(1, spanPct));
+  if (span <= 0) return "0 1";
+
+  const dash = 0.03;
+  const gap = 0.022;
+  const parts: number[] = [];
+  let covered = 0;
+  let drawDash = true;
+
+  while (covered < span - 0.0001) {
+    const remaining = span - covered;
+    const size = Math.min(drawDash ? dash : gap, remaining);
+    parts.push(size);
+    covered += size;
+    drawDash = !drawDash;
+  }
+
+  const used = parts.reduce((total, value) => total + value, 0);
+  const remainder = Math.max(0, 1 - used);
+
+  // stroke-dasharray は dash/gap 交互。次が dash だと余りが線になるので 0 を挟む
+  if (drawDash) {
+    parts.push(0, remainder);
+  } else {
+    parts.push(remainder);
+  }
+
+  return parts.join(" ");
+}
 
 export function AdminBoard() {
   const {
     state,
     isAdmin,
+    currentUser,
     workers,
     setDesiredShiftStatus,
     updateDesiredShiftTimes,
@@ -52,6 +88,7 @@ export function AdminBoard() {
 
   const {
     todayKey,
+    defaultSelectedDateKey,
     calendarMonth,
     monthPickerOpen,
     setMonthPickerOpen,
@@ -65,9 +102,9 @@ export function AdminBoard() {
     navigateToDate,
   } = useWorkCalendarNavigation();
   const [viewMode, setViewMode] = useState<"calendar" | "day" | "workers">("day");
-  const statusRank = (status: "adjusting" | "confirmed" | "unconfirmed") =>
-    status === "confirmed" ? 0 : status === "adjusting" ? 1 : 2;
-  const [selectedDate, setSelectedDate] = useState(todayKey);
+  const statusRank = (status: ConfirmedShift["status"]) =>
+    isAttendanceStatus(status) ? 0 : status === "adjusting" ? 1 : 2;
+  const [selectedDate, setSelectedDate] = useState(defaultSelectedDateKey);
   const [selectedWorkerId, setSelectedWorkerId] = useState(state.staffList.find((s) => s.role === "worker")?.id ?? "");
   const [selectedWeekIndex, setSelectedWeekIndex] = useState(0);
   const [requiredEditor, setRequiredEditor] = useState<{
@@ -151,7 +188,7 @@ export function AdminBoard() {
     [selectedWeekDates, state.desiredShifts]
   );
   const weeklyViewConfirmed = useMemo(
-    () => state.confirmedShifts.filter((shift) => selectedWeekDates.includes(shift.date) && shift.status === "confirmed"),
+    () => state.confirmedShifts.filter((shift) => selectedWeekDates.includes(shift.date) && isAttendanceStatus(shift.status)),
     [selectedWeekDates, state.confirmedShifts]
   );
   const selectedWeekSummaries = useMemo(
@@ -235,24 +272,21 @@ export function AdminBoard() {
     setDropTargetKey(null);
   };
 
-  const masterDepartments = useMemo(() => {
-    const merged = new Set<string>();
-    for (const department of state.departments) {
-      if (department) merged.add(department);
-    }
-    for (const staff of state.staffList) {
-      if (staff.team) merged.add(staff.team);
-    }
-    for (const slots of selectedGoalBlocks) {
-      for (const department of slots) {
-        if (department) merged.add(department);
-      }
-    }
-    return Array.from(merged);
-  }, [selectedGoalBlocks, state.departments, state.staffList]);
+  // 全部署を表示（本部除く）。編集・確定は managedTeams のみ
+  const masterDepartments = useMemo(
+    () => listOperableDepartmentNames(state.departments),
+    [state.departments]
+  );
+
+  const operableDepartments = useMemo(
+    () => getManagedDepartmentsForAdmin(currentUser, masterDepartments),
+    [currentUser, masterDepartments]
+  );
+
+  const operableDepartmentSet = useMemo(() => new Set(operableDepartments), [operableDepartments]);
 
   const csvDepartmentOptions = useMemo(
-    () => getGoalDisplayDepartments(masterDepartments).filter((d) => d !== "本部"),
+    () => getGoalDisplayDepartments(masterDepartments),
     [masterDepartments]
   );
 
@@ -325,6 +359,7 @@ export function AdminBoard() {
   );
   function handlePublishDepartment(department: string) {
     if (!selectedWeekDates[0]) return;
+    if (!canOperateDepartment(currentUser, department, masterDepartments)) return;
     publishConfirmed("week", selectedWeekDates[0], department);
     setPublishModalDepartment(null);
   }
@@ -446,10 +481,7 @@ export function AdminBoard() {
     const publishMap = new Map(
       departmentPublishGroups.map(({ department, issues, summaries }) => [department, { issues, summaries }])
     );
-    const orderedDepartments = [
-      ...getGoalDisplayDepartments(masterDepartments),
-      ...(ganttDepartmentGroups.some(({ department }) => department === "未設定") ? ["未設定"] : []),
-    ];
+    const orderedDepartments = getGoalDisplayDepartments(masterDepartments);
 
     return orderedDepartments.map((department) => ({
       department,
@@ -681,7 +713,7 @@ export function AdminBoard() {
                         </div>
                         <div className="day-meta day-status-strip">
                           {departmentRows.map(({ department, entries }, index) => {
-                            const isPublished = entries.length > 0 && entries.every(({ currentStatus }) => currentStatus === "confirmed");
+                            const isPublished = entries.length > 0 && entries.every(({ currentStatus }) => isAttendanceStatus(currentStatus));
                             const isPending = entries.some(({ currentStatus }) => currentStatus === "adjusting");
                             return (
                               <div
@@ -692,7 +724,7 @@ export function AdminBoard() {
                                 <div className="day-status-row-icons">
                                   {entries.map(({ staff, currentStatus, shift }) => {
                                     const statusColor =
-                                      currentStatus === "confirmed"
+                                      isAttendanceStatus(currentStatus)
                                         ? "#22c55e"
                                         : currentStatus === "adjusting"
                                           ? "#f59e0b"
@@ -711,25 +743,30 @@ export function AdminBoard() {
                                       : 0;
                                     const spanPct = Math.max(0, endPct - startPct);
                                     const iconChar = getStaffDisplayInitial(staff);
+                                    const isRemote = currentStatus === "remote";
+                                    const progressDasharray = isRemote
+                                      ? buildRemoteRingDashArray(spanPct)
+                                      : `${spanPct} ${1 - spanPct}`;
                                     return (
                                       <span
                                         key={staff.id}
                                         className={`day-status-icon ${currentStatus}`}
-                                        title={`${getStaffDisplayName(staff)}さん`}
+                                        title={`${getStaffDisplayName(staff)}さん${isRemote ? "（在宅）" : ""}`}
                                       >
                                         <svg className="day-status-ring" viewBox="0 0 20 20" aria-hidden="true">
                                           <circle cx="10" cy="10" r="7.5" fill="none" stroke="#e5e7eb" strokeWidth="2" />
                                           {shift && spanPct > 0 ? (
                                             <circle
+                                              className="day-status-ring-progress"
                                               cx="10"
                                               cy="10"
                                               r="7.5"
                                               fill="none"
                                               stroke={statusColor}
-                                              strokeWidth="2"
-                                              strokeLinecap="round"
+                                              strokeWidth={isRemote ? 1.6 : 2}
+                                              strokeLinecap={isRemote ? "butt" : "round"}
                                               pathLength={1}
-                                              strokeDasharray={`${spanPct} ${1 - spanPct}`}
+                                              strokeDasharray={progressDasharray}
                                               strokeDashoffset={-startPct}
                                               transform="rotate(-90 10 10)"
                                             />
@@ -915,19 +952,30 @@ export function AdminBoard() {
       </section>
 
       <div className="department-sections-grid">
-        {departmentSections.map(({ department, entries, issues, summaries }) => {
-          return (
-            <section key={department} className="department-section-card">
+        {departmentSections.length === 0 ? (
+          <section className="panel stack">
+            <p style={{ margin: 0 }}>表示する所属がありません。</p>
+          </section>
+        ) : (
+          departmentSections.map(({ department, entries, issues, summaries }) => {
+            const canOperate = operableDepartmentSet.has(department);
+            return (
+            <section
+              key={department}
+              className={`department-section-card${canOperate ? "" : " department-section-readonly"}`}
+            >
               <div className="department-section-header">
                 <div className="department-section-title-text">
                   <strong>{department}</strong>
                   <span className="muted">{formatDateWithWeekday(selectedDate)}</span>
+                  {!canOperate ? <span className="badge">閲覧のみ</span> : null}
                 </div>
                 <button
                   type="button"
                   className="btn primary"
                   onClick={() => setPublishModalDepartment(department)}
-                  disabled={issues.length > 0}
+                  disabled={!canOperate || issues.length > 0}
+                  title={!canOperate ? "この所属の確定権限がありません" : undefined}
                 >
                   確定
                 </button>
@@ -974,7 +1022,9 @@ export function AdminBoard() {
                                 if (variant === "hidden" || fuelMinutes <= 0) return null;
 
                                 const isHeart = icon.kind === "excess";
+                                const canDragIcon = canOperate && isHeart;
                                 const isDropTarget =
+                                  canOperate &&
                                   dropTargetKey === iconKey &&
                                   icon.kind === "shortage" &&
                                   Boolean(draggingHeartKey);
@@ -986,20 +1036,22 @@ export function AdminBoard() {
                                 return (
                                   <span
                                     key={iconKey}
-                                    draggable={isHeart}
+                                    draggable={canDragIcon}
                                     className={[
                                       "person-icon",
                                       "goal-person-icon",
                                       `goal-person-icon-${variant}`,
-                                      isHeart ? "goal-person-icon-draggable" : "",
-                                      isHeart && draggingHeartKey === iconKey ? "goal-person-icon-dragging" : "",
+                                      canDragIcon ? "goal-person-icon-draggable" : "",
+                                      canDragIcon && draggingHeartKey === iconKey
+                                        ? "goal-person-icon-dragging"
+                                        : "",
                                       isDropTarget ? "goal-person-icon-drop-target" : "",
                                     ]
                                       .filter(Boolean)
                                       .join(" ")}
                                     title={`${icon.department} ${fuelLabel}`}
                                     onDragStart={(e) => {
-                                      if (!isHeart || fuelMinutes <= 0) {
+                                      if (!canDragIcon || fuelMinutes <= 0) {
                                         e.preventDefault();
                                         return;
                                       }
@@ -1012,7 +1064,7 @@ export function AdminBoard() {
                                       setDropTargetKey(null);
                                     }}
                                     onDragOver={(e) => {
-                                      if (icon.kind !== "shortage" || !draggingHeartKey) return;
+                                      if (!canOperate || icon.kind !== "shortage" || !draggingHeartKey) return;
                                       const heartIcon = findGoalIconByKey(draggingHeartKey);
                                       if (!heartIcon || !goalDepartmentsMatch(heartIcon.department, icon.department)) {
                                         return;
@@ -1027,7 +1079,7 @@ export function AdminBoard() {
                                       }
                                     }}
                                     onDrop={(e) => {
-                                      if (icon.kind !== "shortage" || !draggingHeartKey) return;
+                                      if (!canOperate || icon.kind !== "shortage" || !draggingHeartKey) return;
                                       e.preventDefault();
                                       handleGoalIconDrop(draggingHeartKey, iconKey);
                                     }}
@@ -1046,8 +1098,9 @@ export function AdminBoard() {
                       ) : (
                         entries.map(({ staff, desiredShift, confirmedShift, currentStatus }) => {
                           const editableDesired = desiredShift;
-                          const canEditStatus = Boolean(editableDesired || confirmedShift);
-                          const canEditTime = currentStatus !== "unconfirmed" && Boolean(editableDesired);
+                          const canEditStatus = canOperate && Boolean(editableDesired || confirmedShift);
+                          const canEditTime =
+                            canOperate && currentStatus !== "unconfirmed" && Boolean(editableDesired);
                           return (
                             <div key={staff.id} className="timeline-row timeline-row-gantt">
                               <div className="timeline-worker-name">
@@ -1056,7 +1109,7 @@ export function AdminBoard() {
                                   value={currentStatus}
                                   onChange={(e) => {
                                     if (!canEditStatus) return;
-                                    const nextStatus = e.target.value as "adjusting" | "confirmed" | "unconfirmed";
+                                    const nextStatus = e.target.value as ConfirmedShift["status"];
                                     if (editableDesired) {
                                       setDesiredShiftStatus(editableDesired.id, nextStatus);
                                       return;
@@ -1068,11 +1121,26 @@ export function AdminBoard() {
                                   disabled={!canEditStatus}
                                 >
                                   <option value="confirmed">出社</option>
+                                  <option value="remote">在宅</option>
                                   <option value="adjusting">調整</option>
                                   <option value="unconfirmed">休み</option>
                                 </select>
                                 <div className="timeline-worker-meta">
-                                  <span>{getStaffDisplayName(staff)}</span>
+                                  <span className="timeline-worker-name-row">
+                                    <span>{getStaffDisplayName(staff)}</span>
+                                    {(desiredShift?.note || confirmedShift?.note)?.trim() ? (
+                                      <span
+                                        className="gantt-worker-note-alert"
+                                        tabIndex={0}
+                                        aria-label={`備考: ${(desiredShift?.note || confirmedShift?.note || "").trim()}`}
+                                      >
+                                        <Icons.Alert size={18} strokeWidth={2.6} />
+                                        <span className="gantt-worker-note-tooltip" role="tooltip">
+                                          {(desiredShift?.note || confirmedShift?.note || "").trim()}
+                                        </span>
+                                      </span>
+                                    ) : null}
+                                  </span>
                                   <span className="timeline-week-hours">
                                     週合計 {formatMinutes(selectedWeekSummaryMap.get(staff.id)?.confirmedMinutes ?? 0)}
                                   </span>
@@ -1166,16 +1234,6 @@ export function AdminBoard() {
                                         </>
                                       )}
                                     </div>
-                                    {desiredShift.note ? (
-                                      <button
-                                        type="button"
-                                        className="gantt-note-icon"
-                                        title={desiredShift.note}
-                                        aria-label="備考を見る"
-                                      >
-                                        <Icons.Note size={14} />
-                                      </button>
-                                    ) : null}
                                   </>
                                 ) : (
                                   <div style={{ minHeight: 24 }} />
@@ -1195,7 +1253,8 @@ export function AdminBoard() {
               </div>
             </section>
           );
-        })}
+        })
+        )}
       </div>
       {publishModalSection && (
         <div className="modal-backdrop" onClick={() => setPublishModalDepartment(null)}>
@@ -1211,7 +1270,10 @@ export function AdminBoard() {
                 type="button"
                 className="btn primary"
                 onClick={() => handlePublishDepartment(publishModalSection.department)}
-                disabled={publishModalSection.issues.length > 0}
+                disabled={
+                  publishModalSection.issues.length > 0 ||
+                  !operableDepartmentSet.has(publishModalSection.department)
+                }
               >
                 確定
               </button>
@@ -1228,15 +1290,21 @@ export function AdminBoard() {
               <h3 style={{ marginTop: 0 }}>必要勤務時間を入力してください</h3>
               <div className="form-grid required-dept-form">
                 <div className="required-dept-grid">
-                {getGoalDisplayDepartments(masterDepartments).map((department) => (
+                {getGoalDisplayDepartments(masterDepartments).map((department) => {
+                  const canEditHours = operableDepartmentSet.has(department);
+                  return (
                   <label key={department} className="required-dept-row">
-                    <span className="required-dept-name">{department}</span>
+                    <span className="required-dept-name">
+                      {department}
+                      {!canEditHours ? <span className="muted">（閲覧）</span> : null}
+                    </span>
                     <span className="required-dept-input-wrap">
                       <input
                         type="number"
                         min="0"
                         step="0.5"
                         value={requiredEditor.departmentHours[department] ?? ""}
+                        disabled={!canEditHours}
                         onChange={(e) =>
                           setRequiredEditor((prev) =>
                             prev
@@ -1254,7 +1322,8 @@ export function AdminBoard() {
                       <span className="required-dept-unit">h</span>
                     </span>
                   </label>
-                ))}
+                  );
+                })}
                 </div>
                 <label>
                   備考

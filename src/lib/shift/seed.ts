@@ -8,22 +8,26 @@ function worker(
     | "iconLabel"
     | "role"
     | "adminPermission"
+    | "managedTeams"
     | "contractRenewalMonths"
     | "salaryHistory"
     | "socialInsurance"
     | "googleEmail"
     | "email"
+    | "note"
   > &
     Partial<
       Pick<
         Staff,
         | "displayGivenName"
         | "iconLabel"
+        | "managedTeams"
         | "contractRenewalMonths"
         | "salaryHistory"
         | "socialInsurance"
         | "googleEmail"
         | "email"
+        | "note"
       >
     >
 ): Staff {
@@ -36,6 +40,7 @@ function worker(
     socialInsurance: false,
     googleEmail: "",
     email: "",
+    note: partial.note ?? "",
     contractRenewalMonths: 3,
     salaryHistory:
       partial.salaryHistory ??
@@ -50,6 +55,7 @@ function worker(
           ]
         : []),
     ...partial,
+    managedTeams: partial.managedTeams ?? [],
   };
 }
 
@@ -152,7 +158,8 @@ export const staffList: Staff[] = [
     firstName: "",
     displayGivenName: false,
     iconLabel: "",
-    team: "本部",
+    team: "リクルーティング",
+    managedTeams: ["リクルーティング", "第1チーム", "第2チーム", "第3チーム"],
     password: "admin",
     role: "admin",
     adminPermission: "manager",
@@ -167,6 +174,7 @@ export const staffList: Staff[] = [
     salaryHistory: [],
     email: "",
     googleEmail: "",
+    note: "",
   },
   {
     id: "staff-901",
@@ -174,7 +182,8 @@ export const staffList: Staff[] = [
     firstName: "",
     displayGivenName: false,
     iconLabel: "",
-    team: "本部",
+    team: "第1チーム",
+    managedTeams: ["第1チーム"],
     password: "general",
     role: "admin",
     adminPermission: "general",
@@ -189,10 +198,35 @@ export const staffList: Staff[] = [
     salaryHistory: [],
     email: "",
     googleEmail: "",
+    note: "",
+  },
+  {
+    id: "staff-902",
+    name: "アルバイト管理者",
+    firstName: "",
+    displayGivenName: false,
+    iconLabel: "",
+    team: "第2チーム",
+    managedTeams: ["第2チーム", "第3チーム"],
+    password: "part",
+    role: "admin",
+    adminPermission: "part_time_admin",
+    status: "active",
+    weeklyContractHours: 40,
+    socialInsurance: false,
+    hireDate: "",
+    contractStartDate: "",
+    contractEndDate: "",
+    contractRenewalMonths: 3,
+    hourlyWage: 0,
+    salaryHistory: [],
+    email: "",
+    googleEmail: "",
+    note: "",
   },
 ];
 
-export const defaultDepartments = ["第1チーム", "第2チーム", "第3チーム", "本部"];
+export const defaultDepartments = ["リクルーティング", "第1チーム", "第2チーム", "第3チーム"];
 
 export const defaultPeriod: ShiftPeriod = {
   id: "period-2026-08-10",

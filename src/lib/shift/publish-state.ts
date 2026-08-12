@@ -1,4 +1,5 @@
 import { getWeekDates } from "@/lib/shift/dates";
+import { isAttendanceStatus } from "@/lib/shift/status";
 import type { ConfirmedShift, DesiredShift, ShiftPeriod } from "@/lib/shift/types";
 
 export function isPublishedWeekDate(period: ShiftPeriod, date: string): boolean {
@@ -9,7 +10,7 @@ export function isPublishedWeekDate(period: ShiftPeriod, date: string): boolean 
 export function getStaffShiftStatus(
   confirmed: ConfirmedShift | undefined,
   desired: DesiredShift | undefined
-): "confirmed" | "adjusting" | "unconfirmed" {
+): ConfirmedShift["status"] {
   return confirmed?.status ?? (desired ? "adjusting" : "unconfirmed");
 }
 
@@ -36,3 +37,5 @@ export function hasStaffPendingAdjustment(
 
   return false;
 }
+
+export { isAttendanceStatus };

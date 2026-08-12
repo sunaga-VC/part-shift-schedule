@@ -15,6 +15,7 @@ import {
   toDateKeyJst,
 } from "@/lib/shift/dates";
 import { getStaffDisplayName } from "@/lib/shift/display";
+import { isAttendanceStatus } from "@/lib/shift/status";
 import { formatTimeRange } from "@/lib/shift/time";
 import type { ConfirmedShift, DesiredShift } from "@/lib/shift/types";
 
@@ -35,6 +36,18 @@ export function HomePage() {
   const todayKey = useMemo(() => toDateKeyJst(new Date()), []);
 
   const workerWeeks = useMemo(() => {
+    const emptyWeek = {
+      dates: [] as string[],
+      wishes: [] as DesiredShift[],
+      confirmed: [] as ConfirmedShift[],
+    };
+    if (!currentUser) {
+      return {
+        thisWeek: { label: "今週", range: "", ...emptyWeek },
+        nextWeek: { label: "来週", range: "", ...emptyWeek },
+      };
+    }
+    const userId = currentUser.id;
     const thisWeekMonday = getMondayOfWeek(todayKey);
     const nextWeekMonday = addDays(thisWeekMonday, 7);
     const thisWeekDates = getWorkWeekDates(todayKey);
@@ -43,14 +56,14 @@ export function HomePage() {
     const collectWeek = (dates: string[]) => {
       const dateSet = new Set(dates);
       const wishes = state.desiredShifts
-        .filter((shift) => shift.staffId === currentUser.id && dateSet.has(shift.date))
+        .filter((shift) => shift.staffId === userId && dateSet.has(shift.date))
         .sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime));
       const confirmed = state.confirmedShifts
         .filter(
           (shift) =>
-            shift.staffId === currentUser.id &&
+            shift.staffId === userId &&
             dateSet.has(shift.date) &&
-            shift.status === "confirmed" &&
+            isAttendanceStatus(shift.status) &&
             Boolean(shift.publishedAt)
         )
         .sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime));
@@ -61,7 +74,7 @@ export function HomePage() {
       thisWeek: { label: "今週", range: formatDateRangeShort(thisWeekDates), ...collectWeek(thisWeekDates) },
       nextWeek: { label: "来週", range: formatDateRangeShort(nextWeekDates), ...collectWeek(nextWeekDates) },
     };
-  }, [currentUser.id, state.confirmedShifts, state.desiredShifts, todayKey]);
+  }, [currentUser, state.confirmedShifts, state.desiredShifts, todayKey]);
 
   const workerSummary = useMemo(() => {
     const wishDays = new Set([
@@ -75,6 +88,16 @@ export function HomePage() {
     const todayConfirmed = workerWeeks.thisWeek.confirmed.filter((s) => s.date === todayKey);
     return { wishDays, confirmedDays, todayConfirmed };
   }, [todayKey, workerWeeks]);
+
+  if (!currentUser) {
+    return (
+      <div className="stack home-page">
+        <section className="panel">
+          <p style={{ margin: 0 }}>ログイン情報を確認しています…</p>
+        </section>
+      </div>
+    );
+  }
 
   const displayName = getStaffDisplayName(currentUser);
 
@@ -141,25 +164,12 @@ export function HomePage() {
               <div className="home-mini-stat-value">{workerSummary.confirmedDays}日</div>
             </article>
           </div>
-        ) : (
-          <div className="home-hero-aside home-hero-aside-admin">
-            <article className="home-mini-stat accent">
-              <div className="home-mini-stat-label">いまの役割</div>
-              <div className="home-mini-stat-value sm">
-                {currentUser.adminPermission === "manager" ? "マネージャー" : "一般管理者"}
-              </div>
-            </article>
-            <article className="home-mini-stat">
-              <div className="home-mini-stat-label">所属</div>
-              <div className="home-mini-stat-value sm">{currentUser.team || "本部"}</div>
-            </article>
-          </div>
-        )}
+        ) : null}
       </section>
 
       {isAdmin ? (
         <>
-          <AdminHomeMessages />
+          {canManageMaster ? <AdminHomeMessages /> : null}
           <AdminDashboard />
         </>
       ) : (

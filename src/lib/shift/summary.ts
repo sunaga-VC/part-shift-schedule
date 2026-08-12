@@ -1,8 +1,10 @@
 import {
+  buildGoalRequiredMinutesByDepartment,
   countGoalIcons,
   getGoalBlocksForDate,
   GOAL_SLOT_MINUTES,
 } from "./goal";
+import { isAttendanceStatus } from "./status";
 import type {
   AppState,
   ConfirmedShift,
@@ -20,18 +22,31 @@ export function getActiveWorkers(staffList: Staff[]): Staff[] {
 function getRequiredMinutesForDate(
   date: string,
   requiredShifts: RequiredShiftCount[],
-  goalBlocksByDate?: AppState["goalBlocksByDate"]
+  goalBlocksByDate?: AppState["goalBlocksByDate"],
+  departmentFilter?: string
 ): { requiredPeople: number; requiredMinutes: number } {
   if (goalBlocksByDate) {
     const blocks = getGoalBlocksForDate({ goalBlocksByDate }, date);
-    const iconCount = countGoalIcons(blocks);
-    const required = requiredShifts.find((s) => s.date === date);
-    if (iconCount > 0) {
-      return {
-        requiredPeople: required?.requiredPeople ?? 0,
-        requiredMinutes: iconCount * GOAL_SLOT_MINUTES,
-      };
+    if (departmentFilter) {
+      const byDept = buildGoalRequiredMinutesByDepartment(blocks);
+      const requiredMinutes = byDept[departmentFilter] ?? 0;
+      if (requiredMinutes > 0) {
+        return { requiredPeople: 0, requiredMinutes };
+      }
+    } else {
+      const iconCount = countGoalIcons(blocks);
+      const required = requiredShifts.find((s) => s.date === date);
+      if (iconCount > 0) {
+        return {
+          requiredPeople: required?.requiredPeople ?? 0,
+          requiredMinutes: iconCount * GOAL_SLOT_MINUTES,
+        };
+      }
     }
+  }
+
+  if (departmentFilter) {
+    return { requiredPeople: 0, requiredMinutes: 0 };
   }
 
   const required = requiredShifts.find((s) => s.date === date);
@@ -45,7 +60,8 @@ export function buildDaySummaries(
   desiredShifts: DesiredShift[],
   confirmedShifts: ConfirmedShift[],
   requiredShifts: RequiredShiftCount[],
-  goalBlocksByDate?: AppState["goalBlocksByDate"]
+  goalBlocksByDate?: AppState["goalBlocksByDate"],
+  departmentFilter?: string
 ): ShiftDaySummary[] {
   const dates = new Set<string>();
   for (const shift of desiredShifts) dates.add(shift.date);
@@ -53,7 +69,12 @@ export function buildDaySummaries(
   for (const required of requiredShifts) dates.add(required.date);
   if (goalBlocksByDate) {
     for (const [date, blocks] of Object.entries(goalBlocksByDate)) {
-      if (countGoalIcons(blocks) > 0) dates.add(date);
+      if (departmentFilter) {
+        const minutes = buildGoalRequiredMinutesByDepartment(blocks)[departmentFilter] ?? 0;
+        if (minutes > 0) dates.add(date);
+      } else if (countGoalIcons(blocks) > 0) {
+        dates.add(date);
+      }
     }
   }
 
@@ -61,8 +82,13 @@ export function buildDaySummaries(
     .sort()
     .map((date) => {
       const desiredForDay = desiredShifts.filter((s) => s.date === date);
-      const confirmedForDay = confirmedShifts.filter((s) => s.date === date && s.status === "confirmed");
-      const { requiredPeople, requiredMinutes } = getRequiredMinutesForDate(date, requiredShifts, goalBlocksByDate);
+      const confirmedForDay = confirmedShifts.filter((s) => s.date === date && isAttendanceStatus(s.status));
+      const { requiredPeople, requiredMinutes } = getRequiredMinutesForDate(
+        date,
+        requiredShifts,
+        goalBlocksByDate,
+        departmentFilter
+      );
       const desiredMinutes = desiredForDay.reduce((t, s) => t + s.actualMinutes, 0);
       const confirmedMinutes = confirmedForDay.reduce((t, s) => t + s.actualMinutes, 0);
 
@@ -95,7 +121,7 @@ export function buildWeeklyStaffSummary(
         .filter((s) => s.staffId === staff.id)
         .reduce((t, s) => t + s.actualMinutes, 0);
       const confirmedMinutes = confirmedShifts
-        .filter((s) => s.staffId === staff.id && s.status === "confirmed")
+        .filter((s) => s.staffId === staff.id && isAttendanceStatus(s.status))
         .reduce((t, s) => t + s.actualMinutes, 0);
       const contractMinutes = staff.weeklyContractHours * 60 * contractWeeks;
 
@@ -115,10 +141,17 @@ export function buildDashboardStats(
   desiredShifts: DesiredShift[],
   confirmedShifts: ConfirmedShift[],
   requiredShifts: RequiredShiftCount[],
-  goalBlocksByDate?: AppState["goalBlocksByDate"]
+  goalBlocksByDate?: AppState["goalBlocksByDate"],
+  departmentFilter?: string
 ) {
   const workers = getActiveWorkers(staffList);
-  const daySummaries = buildDaySummaries(desiredShifts, confirmedShifts, requiredShifts, goalBlocksByDate);
+  const daySummaries = buildDaySummaries(
+    desiredShifts,
+    confirmedShifts,
+    requiredShifts,
+    goalBlocksByDate,
+    departmentFilter
+  );
   const weekly = buildWeeklyStaffSummary(staffList, desiredShifts, confirmedShifts);
   const activeWeekly = weekly.filter((w) => workers.some((worker) => worker.id === w.staffId));
 
@@ -128,7 +161,7 @@ export function buildDashboardStats(
 
   const desiredMinutes = desiredShifts.reduce((t, s) => t + s.actualMinutes, 0);
   const confirmedMinutes = confirmedShifts
-    .filter((s) => s.status === "confirmed")
+    .filter((s) => isAttendanceStatus(s.status))
     .reduce((t, s) => t + s.actualMinutes, 0);
   const requiredMinutes = daySummaries.reduce((t, d) => t + d.requiredMinutes, 0);
 

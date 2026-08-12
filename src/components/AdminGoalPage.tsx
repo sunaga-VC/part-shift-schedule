@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { Icons } from "@/components/icons";
 import { useShift } from "@/context/ShiftContext";
+import { listOperableDepartmentNames } from "@/lib/shift/adminDepartments";
 import { formatDateLong, formatDateShort } from "@/lib/shift/dates";
 import {
   GOAL_BLOCK_TIMES,
@@ -32,8 +33,8 @@ export function AdminGoalPage() {
   const [repeatMessage, setRepeatMessage] = useState<string | null>(null);
 
   const departments = useMemo(
-    () => (state.departments.length > 0 ? state.departments : Array.from(new Set(state.staffList.map((s) => s.team)))),
-    [state.departments, state.staffList]
+    () => listOperableDepartmentNames(state.departments),
+    [state.departments]
   );
   const displayDepartments = useMemo(() => getGoalDisplayDepartments(departments), [departments]);
 

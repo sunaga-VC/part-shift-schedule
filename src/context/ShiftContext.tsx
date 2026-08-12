@@ -6,17 +6,36 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
 import { getWeekDates, nowIso, toDateKey } from "@/lib/shift/dates";
-import { buildGoalRequiredMinutesByDepartment, normalizeGoalBlocks, DEFAULT_GOAL_DEPARTMENT } from "@/lib/shift/goal";
+import {
+  buildGoalRequiredMinutesByDepartment,
+  normalizeGoalBlocks,
+  DEFAULT_GOAL_DEPARTMENT,
+  isFixedDepartmentName,
+} from "@/lib/shift/goal";
 import { cloneGoalBlocks, getEffectiveGoalBlocks, getRepeatTargetDates, type GoalRepeatRule } from "@/lib/shift/goalRepeat";
+import {
+  canManageAdminAccounts,
+  canManageMaster as hasMasterPermission,
+  normalizeAdminPermission,
+} from "@/lib/shift/permissions";
 import { createInitialState } from "@/lib/shift/seed";
+import { isAttendanceStatus } from "@/lib/shift/status";
 import { DEFAULT_CONTRACT_RENEWAL_MONTHS } from "@/lib/shift/staffEmployment";
 import { calcActualMinutes, calcBreakMinutes, isValidTimeRange } from "@/lib/shift/time";
 import { createClient } from "@/lib/supabase/client";
-import { fetchStaffBootstrap } from "@/lib/supabase/staff";
+import {
+  fetchStaffBootstrap,
+  persistSalaryRaise,
+  persistSalaryRaiseUpdate,
+  persistStaffDelete,
+  persistStaffUpdate,
+  type StaffPersistPatch,
+} from "@/lib/supabase/staff";
 import type {
   AppState,
   ConfirmedShift,
@@ -38,6 +57,7 @@ type StaffEditableFields = Pick<
   | "iconLabel"
   | "password"
   | "team"
+  | "managedTeams"
   | "status"
   | "weeklyContractHours"
   | "socialInsurance"
@@ -51,6 +71,7 @@ type StaffEditableFields = Pick<
   | "salaryHistory"
   | "email"
   | "googleEmail"
+  | "note"
 >;
 
 function normalizeStaff(staff: Staff): Staff {
@@ -69,15 +90,17 @@ function normalizeStaff(staff: Staff): Staff {
     displayGivenName: staff.displayGivenName ?? false,
     iconLabel: staff.iconLabel ?? "",
     password: staff.password ?? "",
-    adminPermission:
+    managedTeams:
       staff.role === "admin"
-        ? staff.adminPermission === "general"
-          ? "general"
-          : "manager"
-        : "general",
+        ? Array.isArray(staff.managedTeams)
+          ? staff.managedTeams.filter((team) => Boolean(team?.trim()) && team !== "本部")
+          : []
+        : [],
+    adminPermission: normalizeAdminPermission(staff.role, staff.adminPermission),
     socialInsurance: Boolean(staff.socialInsurance),
     googleEmail: staff.googleEmail ?? "",
     email: staff.email ?? "",
+    note: staff.note ?? "",
     hireDate: staff.hireDate ?? "",
     contractStartDate: staff.contractStartDate ?? "",
     contractEndDate: staff.contractEndDate ?? "",
@@ -121,10 +144,12 @@ type ShiftContextValue = {
   /** Supabase Auth でログイン中（デモ切替を出さない） */
   usingSupabaseAuth: boolean;
   state: AppState;
-  currentUser: Staff;
+  currentUser: Staff | undefined;
   isAdmin: boolean;
-  /** マスタ管理を利用できる（管理者かつマネージャー） */
+  /** マスタ管理を利用できる（マネージャー / アルバイト管理者） */
   canManageMaster: boolean;
+  /** 管理者アカウントを管理できる（マネージャーのみ） */
+  canManageAdminAccounts: boolean;
   workers: Staff[];
   setCurrentUserId: (id: string) => void;
   updatePeriod: (patch: Partial<ShiftPeriod>) => void;
@@ -133,6 +158,10 @@ type ShiftContextValue = {
   setGoalBlocksForDate: (date: string, blocks: [string[], string[], string[], string[]]) => void;
   applyGoalBlocksRepeat: (sourceDate: string, rule: GoalRepeatRule) => number;
   updateStaff: (staffId: string, patch: Partial<StaffEditableFields>) => void;
+  changeStaffPassword: (
+    staffId: string,
+    password: string
+  ) => Promise<{ ok: true } | { ok: false; message: string }>;
   createStaff: (
     input: StaffEditableFields
   ) => Promise<{ ok: true; id: string } | { ok: false; message: string }>;
@@ -140,11 +169,19 @@ type ShiftContextValue = {
   addSalaryRaise: (
     staffId: string,
     input: { effectiveDate: string; hourlyWage: number; note: string }
-  ) => { ok: true } | { ok: false; message: string };
-  deleteStaff: (staffId: string) => void;
-  addDepartment: (name: string) => { ok: true } | { ok: false; message: string };
-  updateDepartment: (oldName: string, nextName: string) => void;
-  deleteDepartment: (name: string) => void;
+  ) => Promise<{ ok: true } | { ok: false; message: string }>;
+  updateSalaryRaise: (
+    staffId: string,
+    raiseId: string,
+    input: { effectiveDate: string; hourlyWage: number; note: string }
+  ) => Promise<{ ok: true } | { ok: false; message: string }>;
+  deleteStaff: (staffId: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+  addDepartment: (name: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+  updateDepartment: (
+    oldName: string,
+    nextName: string
+  ) => Promise<{ ok: true } | { ok: false; message: string }>;
+  deleteDepartment: (name: string) => Promise<{ ok: true } | { ok: false; message: string }>;
   upsertDesiredShift: (input: WishInput) => { ok: true } | { ok: false; message: string };
   deleteDesiredShift: (date: string) => { ok: true } | { ok: false; message: string };
   updateDesiredShiftTimes: (
@@ -153,7 +190,7 @@ type ShiftContextValue = {
     endTime: string
   ) => { ok: true } | { ok: false; message: string };
   addConfirmedFromDesired: (desiredId: string) => void;
-  setDesiredShiftStatus: (desiredId: string, status: "adjusting" | "unconfirmed" | "confirmed") => void;
+  setDesiredShiftStatus: (desiredId: string, status: ConfirmedShift["status"]) => void;
   updateConfirmedShift: (
     id: string,
     patch: Partial<Pick<ConfirmedShift, "startTime" | "endTime" | "adminNote" | "note" | "status">>
@@ -239,56 +276,182 @@ function loadState(): AppState {
   }
 }
 
+async function detectSupabaseSession(): Promise<boolean> {
+  try {
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    return Boolean(user);
+  } catch {
+    return false;
+  }
+}
+
 export function ShiftProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppState>(createInitialState);
   const [ready, setReady] = useState(false);
   const [usingSupabaseAuth, setUsingSupabaseAuth] = useState(false);
+  const usingSupabaseAuthRef = useRef(false);
+  const staffPersistTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const staffPersistPatches = useRef<Record<string, StaffPersistPatch>>({});
+
+  const flushStaffPersists = useCallback(async () => {
+    const entries = Object.entries(staffPersistPatches.current);
+    for (const [staffId, timer] of Object.entries(staffPersistTimers.current)) {
+      clearTimeout(timer);
+      delete staffPersistTimers.current[staffId];
+    }
+    staffPersistPatches.current = {};
+    if (!usingSupabaseAuthRef.current || entries.length === 0) return;
+    try {
+      const supabase = createClient();
+      await Promise.all(
+        entries.map(async ([staffId, patch]) => {
+          const result = await persistStaffUpdate(supabase, staffId, patch);
+          if (!result.ok) {
+            console.error("staff_profiles update failed", result.message);
+          }
+        })
+      );
+    } catch (error) {
+      console.error("staff_profiles flush failed", error);
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
+    let authSubscription: { unsubscribe: () => void } | null = null;
 
-    async function boot() {
+    async function applyAuthUser(userId: string | null) {
       const local = loadState();
-      if (!cancelled) setState(local);
+
+      if (!userId) {
+        usingSupabaseAuthRef.current = false;
+        if (!cancelled) {
+          setUsingSupabaseAuth(false);
+          // 前ユーザーの表示が残らないようにスタッフ情報は捨てる
+          setState({
+            ...local,
+            staffList: [],
+            departments: local.departments ?? [],
+            currentUserId: "",
+          });
+          setReady(true);
+        }
+        return;
+      }
 
       try {
         const supabase = createClient();
-        const bootstrap = await fetchStaffBootstrap(supabase);
-        if (!cancelled && bootstrap && bootstrap.staffList.length > 0) {
+        usingSupabaseAuthRef.current = true;
+        if (!cancelled) {
           setUsingSupabaseAuth(true);
-          setState((prev) => ({
-            ...prev,
-            staffList: bootstrap.staffList,
-            departments:
-              bootstrap.departments.length > 0 ? bootstrap.departments : prev.departments,
-            currentUserId: bootstrap.userId,
-          }));
+          setReady(false);
         }
+
+        const bootstrap = await fetchStaffBootstrap(supabase);
+        if (cancelled) return;
+
+        const staffList = bootstrap?.staffList ?? [];
+
+        setState({
+          ...local,
+          staffList,
+          departments: bootstrap?.departments ?? [],
+          // Auth の user id を必ず正とする（前ユーザーの currentUserId を引きずらない）
+          currentUserId: userId,
+        });
       } catch (error) {
         console.warn("Supabase staff bootstrap skipped", error);
+        if (!cancelled) {
+          setState({
+            ...local,
+            staffList: [],
+            departments: [],
+            currentUserId: userId,
+          });
+        }
       } finally {
         if (!cancelled) setReady(true);
+      }
+    }
+
+    async function boot() {
+      try {
+        const supabase = createClient();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        await applyAuthUser(user?.id ?? null);
+
+        const { data } = supabase.auth.onAuthStateChange((event, session) => {
+          // 初回は getUser 側で処理済み。以降のログイン/ログアウトで必ず差し替える
+          if (event === "INITIAL_SESSION") return;
+          if (
+            event === "SIGNED_IN" ||
+            event === "SIGNED_OUT" ||
+            event === "TOKEN_REFRESHED" ||
+            event === "USER_UPDATED"
+          ) {
+            void applyAuthUser(session?.user?.id ?? null);
+          }
+        });
+        authSubscription = data.subscription;
+      } catch (error) {
+        console.warn("Supabase auth boot failed", error);
+        if (!cancelled) {
+          setUsingSupabaseAuth(false);
+          setState(loadState());
+          setReady(true);
+        }
       }
     }
 
     void boot();
     return () => {
       cancelled = true;
+      authSubscription?.unsubscribe();
     };
   }, []);
 
   useEffect(() => {
     if (!ready) return;
-    // Auth 同期後もシフト等のローカルデータは保存する
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [state, ready]);
+    // シフト等はローカル保存。Supabase 利用時はスタッフ/所属を localStorage に残さない
+    const toStore = usingSupabaseAuth
+      ? {
+          ...state,
+          staffList: [],
+          departments: [],
+        }
+      : state;
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(toStore));
+  }, [state, ready, usingSupabaseAuth]);
 
-  const currentUser = useMemo(() => {
-    return state.staffList.find((s) => s.id === state.currentUserId) ?? state.staffList[0];
-  }, [state.currentUserId, state.staffList]);
+  useEffect(() => {
+    const onHide = () => {
+      void flushStaffPersists();
+    };
+    window.addEventListener("pagehide", onHide);
+    window.addEventListener("beforeunload", onHide);
+    return () => {
+      window.removeEventListener("pagehide", onHide);
+      window.removeEventListener("beforeunload", onHide);
+      void flushStaffPersists();
+    };
+  }, [flushStaffPersists]);
+
+  const currentUser = useMemo((): Staff | undefined => {
+    const matched = state.staffList.find((s) => s.id === state.currentUserId);
+    if (matched) return matched;
+    // Supabase ログイン中は別ユーザーへフォールバックしない（前の管理者名が残るのを防ぐ）
+    if (usingSupabaseAuth) return undefined;
+    return state.staffList[0];
+  }, [state.currentUserId, state.staffList, usingSupabaseAuth]);
 
   const isAdmin = currentUser?.role === "admin";
-  const canManageMaster = Boolean(isAdmin && currentUser?.adminPermission === "manager");
+  const canManageMaster = Boolean(isAdmin && hasMasterPermission(currentUser?.adminPermission));
+  const canManageAdmins = Boolean(isAdmin && canManageAdminAccounts(currentUser?.adminPermission));
   const workers = useMemo(
     () => state.staffList.filter((s) => s.role === "worker" && s.status === "active"),
     [state.staffList]
@@ -381,18 +544,149 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const updateStaff = useCallback((staffId: string, patch: Partial<StaffEditableFields>) => {
-    setState((prev) => ({
-      ...prev,
-      staffList: prev.staffList.map((staff) => (staff.id === staffId ? normalizeStaff({ ...staff, ...patch }) : staff)),
-      departments:
-        patch.team && !prev.departments.includes(patch.team)
-          ? [...prev.departments, patch.team]
-          : prev.departments,
-    }));
+    setState((prev) => {
+      const target = prev.staffList.find((staff) => staff.id === staffId);
+      const actor = prev.staffList.find((staff) => staff.id === prev.currentUserId);
+      if (
+        target?.role === "admin" &&
+        actor?.role === "admin" &&
+        !canManageAdminAccounts(actor.adminPermission)
+      ) {
+        window.alert("管理者アカウントの変更はマネージャーのみ可能です。");
+        return prev;
+      }
+      if (
+        (patch.role === "admin" || patch.adminPermission !== undefined) &&
+        actor?.role === "admin" &&
+        !canManageAdminAccounts(actor.adminPermission)
+      ) {
+        window.alert("管理者権限の変更はマネージャーのみ可能です。");
+        return prev;
+      }
+
+      return {
+        ...prev,
+        staffList: prev.staffList.map((staff) =>
+          staff.id === staffId ? normalizeStaff({ ...staff, ...patch }) : staff
+        ),
+        // Supabase 利用時は departments テーブルの内容だけを正とする（所属名の勝手な追加はしない）
+        departments:
+          !usingSupabaseAuthRef.current && patch.team && !prev.departments.includes(patch.team)
+            ? [...prev.departments, patch.team]
+            : prev.departments,
+      };
+    });
+
+    if (!usingSupabaseAuthRef.current) return;
+
+    const { password: _password, salaryHistory: _salaryHistory, ...persistable } = patch;
+    if (Object.keys(persistable).length === 0) return;
+
+    staffPersistPatches.current[staffId] = {
+      ...staffPersistPatches.current[staffId],
+      ...persistable,
+    };
+    if (staffPersistTimers.current[staffId]) {
+      clearTimeout(staffPersistTimers.current[staffId]);
+    }
+    staffPersistTimers.current[staffId] = setTimeout(() => {
+      const merged = staffPersistPatches.current[staffId];
+      delete staffPersistPatches.current[staffId];
+      delete staffPersistTimers.current[staffId];
+      if (!merged) return;
+      void (async () => {
+        try {
+          const { email: nextEmail, ...profilePatch } = merged;
+          if (typeof nextEmail === "string") {
+            const email = nextEmail.trim().toLowerCase();
+            if (email) {
+              const response = await fetch("/api/staff", {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ id: staffId, email }),
+              });
+              const payload = (await response.json()) as { ok: boolean; message?: string };
+              if (!payload.ok) {
+                window.alert(payload.message || "メールアドレスの更新に失敗しました。");
+                return;
+              }
+            }
+          }
+
+          if (Object.keys(profilePatch).length === 0) return;
+
+          const supabase = createClient();
+          const result = await persistStaffUpdate(supabase, staffId, profilePatch);
+          if (!result.ok) {
+            console.error("staff_profiles update failed", result.message);
+            window.alert(`スタッフ情報の保存に失敗しました: ${result.message}`);
+          }
+        } catch (error) {
+          console.error("staff_profiles update failed", error);
+          window.alert("スタッフ情報の保存に失敗しました。");
+        }
+      })();
+    }, 300);
   }, []);
 
+  const changeStaffPassword = useCallback(async (staffId: string, nextPassword: string) => {
+    const password = nextPassword.trim();
+    if (!password) {
+      return { ok: false as const, message: "新しいパスワードを入力してください。" };
+    }
+    if (password.length < 6) {
+      return { ok: false as const, message: "パスワードは6文字以上にしてください。" };
+    }
+
+    const target = state.staffList.find((staff) => staff.id === staffId);
+    const actor = state.staffList.find((staff) => staff.id === state.currentUserId);
+    if (
+      target?.role === "admin" &&
+      actor?.role === "admin" &&
+      !canManageAdminAccounts(actor.adminPermission)
+    ) {
+      return { ok: false as const, message: "管理者アカウントのパスワード変更はマネージャーのみ可能です。" };
+    }
+
+    if (usingSupabaseAuthRef.current || (await detectSupabaseSession())) {
+      usingSupabaseAuthRef.current = true;
+      setUsingSupabaseAuth(true);
+      try {
+        const response = await fetch("/api/staff", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: staffId, password }),
+        });
+        const payload = (await response.json()) as { ok: boolean; message?: string };
+        if (!payload.ok) {
+          return { ok: false as const, message: payload.message || "パスワードの更新に失敗しました。" };
+        }
+        setState((prev) => ({
+          ...prev,
+          staffList: prev.staffList.map((staff) =>
+            staff.id === staffId ? normalizeStaff({ ...staff, password: "" }) : staff
+          ),
+        }));
+        return { ok: true as const };
+      } catch (error) {
+        return {
+          ok: false as const,
+          message: error instanceof Error ? error.message : "パスワードの更新に失敗しました。",
+        };
+      }
+    }
+
+    setState((prev) => ({
+      ...prev,
+      staffList: prev.staffList.map((staff) =>
+        staff.id === staffId ? normalizeStaff({ ...staff, password }) : staff
+      ),
+    }));
+    return { ok: true as const };
+  }, [state.currentUserId, state.staffList]);
+
   const addSalaryRaise = useCallback(
-    (staffId: string, input: { effectiveDate: string; hourlyWage: number; note: string }) => {
+    async (staffId: string, input: { effectiveDate: string; hourlyWage: number; note: string }) => {
       const effectiveDate = input.effectiveDate.trim();
       const hourlyWage = Number(input.hourlyWage);
       if (!effectiveDate) return { ok: false as const, message: "適用日を入力してください" };
@@ -400,13 +694,53 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         return { ok: false as const, message: "時給を正しく入力してください" };
       }
 
+      const note = input.note.trim();
+
+      if (usingSupabaseAuthRef.current || (await detectSupabaseSession())) {
+        usingSupabaseAuthRef.current = true;
+        setUsingSupabaseAuth(true);
+        try {
+          const supabase = createClient();
+          const result = await persistSalaryRaise(supabase, staffId, {
+            effectiveDate,
+            hourlyWage,
+            note,
+          });
+          if (!result.ok) {
+            return { ok: false as const, message: result.message };
+          }
+          const entry: SalaryRaise = {
+            id: result.id,
+            effectiveDate,
+            hourlyWage,
+            note,
+          };
+          setState((prev) => ({
+            ...prev,
+            staffList: prev.staffList.map((staff) => {
+              if (staff.id !== staffId) return staff;
+              return normalizeStaff({
+                ...staff,
+                hourlyWage,
+                salaryHistory: [entry, ...(staff.salaryHistory ?? [])],
+              });
+            }),
+          }));
+          return { ok: true as const };
+        } catch (error) {
+          return {
+            ok: false as const,
+            message: error instanceof Error ? error.message : "昇給の保存に失敗しました。",
+          };
+        }
+      }
+
       const entry: SalaryRaise = {
         id: `raise-${staffId}-${Date.now()}`,
         effectiveDate,
         hourlyWage,
-        note: input.note.trim(),
+        note,
       };
-
       setState((prev) => ({
         ...prev,
         staffList: prev.staffList.map((staff) => {
@@ -423,22 +757,158 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     []
   );
 
-  const addDepartment = useCallback((name: string) => {
+  const updateSalaryRaise = useCallback(
+    async (
+      staffId: string,
+      raiseId: string,
+      input: { effectiveDate: string; hourlyWage: number; note: string }
+    ) => {
+      const effectiveDate = input.effectiveDate.trim();
+      const hourlyWage = Number(input.hourlyWage);
+      if (!effectiveDate) return { ok: false as const, message: "適用日を入力してください" };
+      if (!Number.isFinite(hourlyWage) || hourlyWage < 0) {
+        return { ok: false as const, message: "時給を正しく入力してください" };
+      }
+      const note = input.note.trim();
+
+      if (usingSupabaseAuthRef.current || (await detectSupabaseSession())) {
+        usingSupabaseAuthRef.current = true;
+        setUsingSupabaseAuth(true);
+        try {
+          const supabase = createClient();
+          const result = await persistSalaryRaiseUpdate(supabase, staffId, raiseId, {
+            effectiveDate,
+            hourlyWage,
+            note,
+          });
+          if (!result.ok) {
+            return { ok: false as const, message: result.message };
+          }
+          setState((prev) => ({
+            ...prev,
+            staffList: prev.staffList.map((staff) => {
+              if (staff.id !== staffId) return staff;
+              const isSynthetic = raiseId.startsWith("initial-");
+              const nextHistory = isSynthetic
+                ? [
+                    { id: result.id, effectiveDate, hourlyWage, note },
+                    ...(staff.salaryHistory ?? []).filter((entry) => entry.id !== raiseId),
+                  ]
+                : (staff.salaryHistory ?? []).map((entry) =>
+                    entry.id === raiseId ? { ...entry, effectiveDate, hourlyWage, note } : entry
+                  );
+              const latest = [...nextHistory].sort((a, b) =>
+                b.effectiveDate.localeCompare(a.effectiveDate)
+              )[0];
+              return normalizeStaff({
+                ...staff,
+                hourlyWage: latest?.hourlyWage ?? hourlyWage,
+                salaryHistory: nextHistory,
+              });
+            }),
+          }));
+          return { ok: true as const };
+        } catch (error) {
+          return {
+            ok: false as const,
+            message: error instanceof Error ? error.message : "昇給履歴の更新に失敗しました。",
+          };
+        }
+      }
+
+      setState((prev) => ({
+        ...prev,
+        staffList: prev.staffList.map((staff) => {
+          if (staff.id !== staffId) return staff;
+          const isSynthetic = raiseId.startsWith("initial-");
+          const nextId = isSynthetic ? `raise-${staffId}-${Date.now()}` : raiseId;
+          const nextHistory = isSynthetic
+            ? [
+                { id: nextId, effectiveDate, hourlyWage, note },
+                ...(staff.salaryHistory ?? []).filter((entry) => entry.id !== raiseId),
+              ]
+            : (staff.salaryHistory ?? []).map((entry) =>
+                entry.id === raiseId ? { ...entry, effectiveDate, hourlyWage, note } : entry
+              );
+          const latest = [...nextHistory].sort((a, b) => b.effectiveDate.localeCompare(a.effectiveDate))[0];
+          return normalizeStaff({
+            ...staff,
+            hourlyWage: latest?.hourlyWage ?? hourlyWage,
+            salaryHistory: nextHistory,
+          });
+        }),
+      }));
+      return { ok: true as const };
+    },
+    []
+  );
+
+  const addDepartment = useCallback(async (name: string) => {
     const trimmed = name.trim();
     if (!trimmed) return { ok: false as const, message: "所属名を入力してください" };
-    if (trimmed === DEFAULT_GOAL_DEPARTMENT) {
-      return { ok: false as const, message: "リクルーティングは固定の所属です" };
+    if (isFixedDepartmentName(trimmed)) {
+      return { ok: false as const, message: `${trimmed}は固定の所属です` };
     }
+
+    if (usingSupabaseAuthRef.current || (await detectSupabaseSession())) {
+      usingSupabaseAuthRef.current = true;
+      setUsingSupabaseAuth(true);
+      try {
+        const response = await fetch("/api/departments", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: trimmed }),
+        });
+        const payload = (await response.json()) as { ok: boolean; message?: string };
+        if (!payload.ok) {
+          return { ok: false as const, message: payload.message || "所属の追加に失敗しました。" };
+        }
+      } catch (error) {
+        return {
+          ok: false as const,
+          message: error instanceof Error ? error.message : "所属の追加に失敗しました。",
+        };
+      }
+    }
+
     setState((prev) =>
       prev.departments.includes(trimmed) ? prev : { ...prev, departments: [...prev.departments, trimmed] }
     );
     return { ok: true as const };
   }, []);
 
-  const updateDepartment = useCallback((oldName: string, nextName: string) => {
-    if (oldName === DEFAULT_GOAL_DEPARTMENT) return;
+  const updateDepartment = useCallback(async (oldName: string, nextName: string) => {
+    if (isFixedDepartmentName(oldName)) {
+      return { ok: false as const, message: `${oldName}は変更できません` };
+    }
     const trimmed = nextName.trim();
-    if (!trimmed || oldName === trimmed) return;
+    if (!trimmed) return { ok: false as const, message: "所属名を入力してください" };
+    if (isFixedDepartmentName(trimmed)) {
+      return { ok: false as const, message: `${trimmed}という名前には変更できません` };
+    }
+    if (oldName === trimmed) return { ok: true as const };
+
+    if (usingSupabaseAuthRef.current || (await detectSupabaseSession())) {
+      usingSupabaseAuthRef.current = true;
+      setUsingSupabaseAuth(true);
+      try {
+        const response = await fetch("/api/departments", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ oldName, nextName: trimmed }),
+        });
+        const payload = (await response.json()) as { ok: boolean; message?: string };
+        if (!payload.ok) {
+          return { ok: false as const, message: payload.message || "所属名の変更に失敗しました。" };
+        }
+      } catch (error) {
+        return {
+          ok: false as const,
+          message: error instanceof Error ? error.message : "所属名の変更に失敗しました。",
+        };
+      }
+    }
+
     setState((prev) => ({
       ...prev,
       staffList: prev.staffList.map((staff) => (staff.team === oldName ? { ...staff, team: trimmed } : staff)),
@@ -454,10 +924,35 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         ])
       ) as AppState["goalBlocksByDate"],
     }));
+    return { ok: true as const };
   }, []);
 
-  const deleteDepartment = useCallback((name: string) => {
-    if (name === DEFAULT_GOAL_DEPARTMENT) return;
+  const deleteDepartment = useCallback(async (name: string) => {
+    if (isFixedDepartmentName(name)) {
+      return { ok: false as const, message: `${name}は削除できません` };
+    }
+
+    if (usingSupabaseAuthRef.current || (await detectSupabaseSession())) {
+      usingSupabaseAuthRef.current = true;
+      setUsingSupabaseAuth(true);
+      try {
+        const response = await fetch("/api/departments", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        });
+        const payload = (await response.json()) as { ok: boolean; message?: string };
+        if (!payload.ok) {
+          return { ok: false as const, message: payload.message || "所属の削除に失敗しました。" };
+        }
+      } catch (error) {
+        return {
+          ok: false as const,
+          message: error instanceof Error ? error.message : "所属の削除に失敗しました。",
+        };
+      }
+    }
+
     setState((prev) => ({
       ...prev,
       departments: prev.departments.filter((department) => department !== name),
@@ -472,113 +967,126 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         ])
       ) as AppState["goalBlocksByDate"],
     }));
+    return { ok: true as const };
   }, []);
 
-  const createStaff = useCallback(
-    async (input: StaffEditableFields) => {
-      const email = (input.email ?? "").trim().toLowerCase();
-      if (!email) {
-        return { ok: false as const, message: "ログイン用メールアドレスを入力してください。" };
-      }
-      if (!input.password?.trim()) {
-        return { ok: false as const, message: "パスワードを入力してください。" };
-      }
+  const createStaff = useCallback(async (input: StaffEditableFields) => {
+    const email = (input.email ?? "").trim().toLowerCase();
+    if (!email) {
+      return { ok: false as const, message: "ログイン用メールアドレスを入力してください。" };
+    }
+    if (!input.password?.trim()) {
+      return { ok: false as const, message: "パスワードを入力してください。" };
+    }
 
-      if (usingSupabaseAuth) {
-        try {
-          const response = await fetch("/api/staff", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              name: input.name,
-              firstName: input.firstName,
-              email,
-              password: input.password,
-              team: input.team,
-              role: input.role,
-              adminPermission: input.adminPermission,
-              status: input.status,
-              weeklyContractHours: input.weeklyContractHours,
-              socialInsurance: input.socialInsurance,
-              googleEmail: input.googleEmail,
-              hireDate: input.hireDate,
-              contractStartDate: input.contractStartDate,
-              contractEndDate: input.contractEndDate,
-              contractRenewalMonths: input.contractRenewalMonths,
-              hourlyWage: input.hourlyWage,
-              displayGivenName: input.displayGivenName,
-            }),
-          });
-          const payload = (await response.json()) as { ok: boolean; id?: string; message?: string };
-          if (!payload.ok || !payload.id) {
-            return { ok: false as const, message: payload.message || "スタッフ作成に失敗しました。" };
-          }
-          const supabase = createClient();
-          const bootstrap = await fetchStaffBootstrap(supabase);
-          if (bootstrap) {
-            setState((prev) => ({
-              ...prev,
-              staffList: bootstrap.staffList,
-              departments:
-                bootstrap.departments.length > 0 ? bootstrap.departments : prev.departments,
-              currentUserId: bootstrap.userId,
-            }));
-          }
-          return { ok: true as const, id: payload.id };
-        } catch (error) {
-          return {
-            ok: false as const,
-            message: error instanceof Error ? error.message : "スタッフ作成に失敗しました。",
-          };
-        }
-      }
+    const actor = currentUser;
+    if (input.role === "admin" && !canManageAdminAccounts(actor?.adminPermission)) {
+      return { ok: false as const, message: "管理者アカウントの作成はマネージャーのみ可能です。" };
+    }
+    if (input.role === "admin" && !(input.managedTeams?.length > 0)) {
+      return { ok: false as const, message: "管理者には操作できる所属を1つ以上選択してください。" };
+    }
+    if (input.role === "worker" && !input.team?.trim()) {
+      return { ok: false as const, message: "所属は必須です。" };
+    }
 
-      const id = `staff-${Date.now()}`;
-      const hireDate = input.hireDate ?? "";
-      const hourlyWage = Number.isFinite(input.hourlyWage) ? input.hourlyWage : 0;
-      const salaryHistory =
-        input.salaryHistory && input.salaryHistory.length > 0
-          ? input.salaryHistory
-          : hourlyWage > 0 && hireDate
-            ? [
-                {
-                  id: `raise-${id}-init`,
-                  effectiveDate: hireDate,
-                  hourlyWage,
-                  note: "初任給",
-                },
-              ]
-            : [];
-      setState((prev) => ({
-        ...prev,
-        staffList: [
-          ...prev.staffList,
-          normalizeStaff({
-            id,
-            ...input,
+    const loggedIn = usingSupabaseAuthRef.current || (await detectSupabaseSession());
+    if (loggedIn) {
+      usingSupabaseAuthRef.current = true;
+      setUsingSupabaseAuth(true);
+      try {
+        const response = await fetch("/api/staff", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: input.name,
+            firstName: input.firstName,
             email,
-            adminPermission:
-              input.role === "admin"
-                ? input.adminPermission === "general"
-                  ? "general"
-                  : "manager"
-                : "general",
-            hireDate,
-            contractStartDate: input.contractStartDate ?? "",
-            contractEndDate: input.contractEndDate ?? "",
-            contractRenewalMonths: input.contractRenewalMonths ?? DEFAULT_CONTRACT_RENEWAL_MONTHS,
-            hourlyWage,
-            socialInsurance: Boolean(input.socialInsurance),
-            googleEmail: input.googleEmail ?? "",
-            salaryHistory,
+            password: input.password,
+            team: input.team,
+            managedTeams: input.managedTeams,
+            role: input.role,
+            adminPermission: input.adminPermission,
+            status: input.status,
+            weeklyContractHours: input.weeklyContractHours,
+            socialInsurance: input.socialInsurance,
+            googleEmail: input.googleEmail,
+            hireDate: input.hireDate,
+            contractStartDate: input.contractStartDate,
+            contractEndDate: input.contractEndDate,
+            contractRenewalMonths: input.contractRenewalMonths,
+            hourlyWage: input.hourlyWage,
+            displayGivenName: input.displayGivenName,
+            note: input.note ?? "",
           }),
-        ],
-        departments: prev.departments.includes(input.team) ? prev.departments : [...prev.departments, input.team],
-      }));
-      return { ok: true as const, id };
-    },
-    [usingSupabaseAuth]
-  );
+        });
+        const payload = (await response.json()) as { ok: boolean; id?: string; message?: string };
+        if (!payload.ok || !payload.id) {
+          return { ok: false as const, message: payload.message || "スタッフ作成に失敗しました。" };
+        }
+        const supabase = createClient();
+        const bootstrap = await fetchStaffBootstrap(supabase);
+        if (bootstrap) {
+          setState((prev) => ({
+            ...prev,
+            staffList: bootstrap.staffList,
+            departments: bootstrap.departments.length > 0 ? bootstrap.departments : prev.departments,
+            currentUserId: bootstrap.userId,
+          }));
+        }
+        return { ok: true as const, id: payload.id };
+      } catch (error) {
+        return {
+          ok: false as const,
+          message: error instanceof Error ? error.message : "スタッフ作成に失敗しました。",
+        };
+      }
+    }
+
+    const id = `staff-${Date.now()}`;
+    const hireDate = input.hireDate ?? "";
+    const contractStartDate = input.contractStartDate ?? "";
+    const hourlyWage = Number.isFinite(input.hourlyWage) ? input.hourlyWage : 0;
+    const initialEffectiveDate = hireDate || contractStartDate || toDateKey(new Date());
+    const salaryHistory =
+      input.salaryHistory && input.salaryHistory.length > 0
+        ? input.salaryHistory
+        : hourlyWage > 0
+          ? [
+              {
+                id: `raise-${id}-init`,
+                effectiveDate: initialEffectiveDate,
+                hourlyWage,
+                note: "初任給",
+              },
+            ]
+          : [];
+    setState((prev) => ({
+      ...prev,
+      staffList: [
+        ...prev.staffList,
+        normalizeStaff({
+          id,
+          ...input,
+          email,
+          managedTeams: input.role === "admin" ? input.managedTeams ?? [] : [],
+          adminPermission: normalizeAdminPermission(input.role, input.adminPermission),
+          team: input.role === "admin" ? input.managedTeams?.[0] ?? input.team ?? "" : input.team,
+          hireDate,
+          contractStartDate,
+          contractEndDate: input.contractEndDate ?? "",
+          contractRenewalMonths: input.contractRenewalMonths ?? DEFAULT_CONTRACT_RENEWAL_MONTHS,
+          hourlyWage,
+          socialInsurance: Boolean(input.socialInsurance),
+          googleEmail: input.googleEmail ?? "",
+          note: input.note ?? "",
+          salaryHistory,
+        }),
+      ],
+      departments: prev.departments.includes(input.team) ? prev.departments : [...prev.departments, input.team],
+    }));
+    return { ok: true as const, id };
+  }, [currentUser]);
 
   const refreshStaffFromSupabase = useCallback(async () => {
     if (!usingSupabaseAuth) return;
@@ -597,7 +1105,29 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     }
   }, [usingSupabaseAuth]);
 
-  const deleteStaff = useCallback((staffId: string) => {
+  const deleteStaff = useCallback(async (staffId: string) => {
+    const target = state.staffList.find((staff) => staff.id === staffId);
+    if (target?.role === "admin" && !canManageAdminAccounts(currentUser?.adminPermission)) {
+      return { ok: false as const, message: "管理者アカウントの削除はマネージャーのみ可能です。" };
+    }
+
+    if (usingSupabaseAuthRef.current || (await detectSupabaseSession())) {
+      usingSupabaseAuthRef.current = true;
+      setUsingSupabaseAuth(true);
+      try {
+        const supabase = createClient();
+        const result = await persistStaffDelete(supabase, staffId);
+        if (!result.ok) {
+          return { ok: false as const, message: result.message };
+        }
+      } catch (error) {
+        return {
+          ok: false as const,
+          message: error instanceof Error ? error.message : "スタッフの削除に失敗しました。",
+        };
+      }
+    }
+
     setState((prev) => {
       const nextStaffList = prev.staffList.filter((staff) => staff.id !== staffId);
       const nextCurrentUserId =
@@ -610,7 +1140,8 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         confirmedShifts: prev.confirmedShifts.filter((shift) => shift.staffId !== staffId),
       };
     });
-  }, []);
+    return { ok: true as const };
+  }, [currentUser, state.staffList]);
 
   const upsertDesiredShift = useCallback(
     (input: WishInput) => {
@@ -629,7 +1160,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           (s) =>
             s.staffId === prev.currentUserId &&
             s.date === input.date &&
-            s.status === "confirmed"
+            isAttendanceStatus(s.status)
         );
         const shouldMarkAdjusting = Boolean(confirmedShift);
 
@@ -703,7 +1234,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           (s) =>
             s.staffId === prev.currentUserId &&
             s.date === date &&
-            s.status === "confirmed"
+            isAttendanceStatus(s.status)
         );
         return {
           ...prev,
@@ -742,7 +1273,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       const existingConfirmed = prev.confirmedShifts.find(
         (s) => s.staffId === desired.staffId && s.date === desired.date
       );
-      const shouldMarkAdjusting = existingConfirmed?.status === "confirmed";
+      const shouldMarkAdjusting = existingConfirmed ? isAttendanceStatus(existingConfirmed.status) : false;
 
       return {
         ...prev,
@@ -780,7 +1311,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     return { ok: true as const };
   }, []);
 
-  const setDesiredShiftStatus = useCallback((desiredId: string, status: "adjusting" | "unconfirmed" | "confirmed") => {
+  const setDesiredShiftStatus = useCallback((desiredId: string, status: ConfirmedShift["status"]) => {
     setState((prev) => {
       const desired = prev.desiredShifts.find((s) => s.id === desiredId);
       if (!desired) return prev;
@@ -807,7 +1338,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
       if (existing) {
         const updatedConfirmed: ConfirmedShift =
-          status === "confirmed"
+          isAttendanceStatus(status)
             ? {
                 ...existing,
                 status,
@@ -910,7 +1441,11 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         for (const dateKey of targetDates) {
           const desired = prev.desiredShifts.find((shift) => shift.staffId === staff.id && shift.date === dateKey);
           const existing = nextConfirmedMap.get(`${staff.id}-${dateKey}`);
-          const nextStatus: ConfirmedShift["status"] = desired ? "confirmed" : "unconfirmed";
+          const nextStatus: ConfirmedShift["status"] = desired
+            ? existing && isAttendanceStatus(existing.status)
+              ? existing.status
+              : "confirmed"
+            : "unconfirmed";
           const nextShift: ConfirmedShift = existing
             ? {
                 ...existing,
@@ -968,7 +1503,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           const staff = prev.staffList.find((item) => item.id === s.staffId);
           if (!staff || staff.team !== department) return s;
         }
-        if (s.status !== "confirmed" && s.status !== "unconfirmed") return s;
+        if (!isAttendanceStatus(s.status) && s.status !== "unconfirmed") return s;
         return { ...s, publishedAt: null, updatedAt: nowIso() };
       }),
       period:
@@ -1019,6 +1554,9 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
   const createHomeMessage = useCallback(
     (input: { body: string; audience: "all" | "team"; team?: string }) => {
+      if (!canManageMaster) {
+        return { ok: false as const, message: "メッセージの送信はマネージャーまたはアルバイト管理者のみ可能です。" };
+      }
       const body = input.body.trim();
       if (!body) return { ok: false as const, message: "メッセージを入力してください。" };
       if (input.audience === "team" && !input.team?.trim()) {
@@ -1037,15 +1575,19 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       });
       return { ok: true as const };
     },
-    []
+    [canManageMaster]
   );
 
-  const deleteHomeMessage = useCallback((messageId: string) => {
-    setState((prev) => ({
-      ...prev,
-      homeMessages: (prev.homeMessages ?? []).filter((m) => m.id !== messageId),
-    }));
-  }, []);
+  const deleteHomeMessage = useCallback(
+    (messageId: string) => {
+      if (!canManageMaster) return;
+      setState((prev) => ({
+        ...prev,
+        homeMessages: (prev.homeMessages ?? []).filter((m) => m.id !== messageId),
+      }));
+    },
+    [canManageMaster]
+  );
 
   const resetDemoData = useCallback(() => {
     const next = createInitialState();
@@ -1057,9 +1599,10 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     ready,
     usingSupabaseAuth,
     state,
-    currentUser: currentUser ?? state.staffList[0],
+    currentUser,
     isAdmin,
     canManageMaster,
+    canManageAdminAccounts: canManageAdmins,
     workers,
     setCurrentUserId,
     updatePeriod,
@@ -1068,9 +1611,11 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     setGoalBlocksForDate,
     applyGoalBlocksRepeat,
     updateStaff,
+    changeStaffPassword,
     createStaff,
     refreshStaffFromSupabase,
     addSalaryRaise,
+    updateSalaryRaise,
     deleteStaff,
     addDepartment,
     updateDepartment,

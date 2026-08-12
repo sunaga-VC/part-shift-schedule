@@ -55,3 +55,45 @@ export function formatShiftSummary(startTime: string, endTime: string, breakMinu
 export function isValidTimeRange(startTime: string, endTime: string): boolean {
   return toMinutes(endTime) > toMinutes(startTime);
 }
+
+/** HH:MM を30分単位に丸める（近い方へ） */
+export function snapTimeToHalfHour(time: string): string {
+  const total = toMinutes(time);
+  const snapped = Math.round(total / 30) * 30;
+  const clamped = Math.min(Math.max(snapped, 0), 23 * 60 + 30);
+  const hours = Math.floor(clamped / MINUTES_PER_HOUR);
+  const minutes = clamped % MINUTES_PER_HOUR;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+/** 30分刻みの時刻選択肢（start〜end を含む） */
+export function buildHalfHourTimeOptions(start = "10:00", end = "18:00"): string[] {
+  const startMinutes = toMinutes(start);
+  const endMinutes = toMinutes(end);
+  const options: string[] = [];
+  for (let minutes = startMinutes; minutes <= endMinutes; minutes += 30) {
+    const hours = Math.floor(minutes / MINUTES_PER_HOUR);
+    const mins = minutes % MINUTES_PER_HOUR;
+    options.push(`${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}`);
+  }
+  return options;
+}
+
+/** アルバイト希望シフト用。社保ありは 18:30 まで */
+export function getWorkerShiftTimeOptions(socialInsurance: boolean): string[] {
+  return buildHalfHourTimeOptions("10:00", socialInsurance ? "18:30" : "18:00");
+}
+
+export function clampTimeToOptions(time: string, options: string[]): string {
+  const snapped = snapTimeToHalfHour(time);
+  if (options.includes(snapped)) return snapped;
+  if (options.length === 0) return snapped;
+  const target = toMinutes(snapped);
+  return options.reduce((best, option) => {
+    const bestDiff = Math.abs(toMinutes(best) - target);
+    const optionDiff = Math.abs(toMinutes(option) - target);
+    return optionDiff < bestDiff ? option : best;
+  }, options[0]);
+}
+
+export const HALF_HOUR_TIME_OPTIONS = buildHalfHourTimeOptions();

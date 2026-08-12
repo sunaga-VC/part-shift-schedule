@@ -1,7 +1,8 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { Icons } from "@/components/icons";
 import { useShift } from "@/context/ShiftContext";
 import { createClient } from "@/lib/supabase/client";
@@ -20,13 +21,14 @@ const adminBaseLinks = [
 
 const masterLink = { href: "/admin/master", label: "マスタ管理", Icon: Icons.Master };
 
-function adminRoleLabel(permission: "manager" | "general"): string {
-  return permission === "manager" ? "マネージャー" : "一般";
+function adminRoleLabel(permission: "manager" | "general" | "part_time_admin"): string {
+  if (permission === "manager") return "マネージャー";
+  if (permission === "part_time_admin") return "アルバイト管理者";
+  return "一般";
 }
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const router = useRouter();
   const { ready, usingSupabaseAuth, state, currentUser, isAdmin, canManageMaster, setCurrentUserId, resetDemoData } =
     useShift();
   const links = isAdmin
@@ -34,6 +36,32 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       ? [...adminBaseLinks, masterLink]
       : adminBaseLinks
     : workerLinks;
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  // クライアント側でも権限外URLを遮断（ブックマーク直打ち対策）
+  useEffect(() => {
+    if (!ready || !currentUser || !usingSupabaseAuth) return;
+    if (!isAdmin && pathname.startsWith("/admin")) {
+      window.location.replace("/");
+      return;
+    }
+    if (isAdmin && !canManageMaster && pathname.startsWith("/admin/master")) {
+      window.location.replace("/admin/board");
+    }
+  }, [ready, currentUser, usingSupabaseAuth, isAdmin, canManageMaster, pathname]);
+
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [menuOpen]);
 
   const handleLogout = async () => {
     try {
@@ -42,8 +70,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     } catch {
       // env 未設定時は無視
     }
-    router.replace("/login");
-    router.refresh();
+    // フル遷移で前ユーザーの表示キャッシュを確実に捨てる
+    window.location.href = "/login";
   };
 
   if (!ready || !currentUser) {
@@ -54,23 +82,65 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     );
   }
 
+  const roleText = isAdmin
+    ? `管理者・${adminRoleLabel(currentUser.adminPermission)}`
+    : "アルバイト";
+
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div>
-          <div className="brand">
-            <span className="brand-mark">
-              <Icons.Brand size={16} strokeWidth={2.2} />
-            </span>
-            シフト調整アプリ
+    <div className={`app-shell${menuOpen ? " menu-open" : ""}`}>
+      <header className="mobile-topbar">
+        <div className="mobile-topbar-brand">
+          <span className="brand-mark">
+            <Icons.Brand size={14} strokeWidth={2.2} />
+          </span>
+          <span className="mobile-topbar-title">シフト調整</span>
+        </div>
+        <button
+          type="button"
+          className="mobile-topbar-btn"
+          onClick={() => setMenuOpen(true)}
+          aria-label="メニューを開く"
+        >
+          <Icons.Menu size={20} />
+        </button>
+      </header>
+
+      {menuOpen ? (
+        <button
+          type="button"
+          className="sidebar-backdrop"
+          aria-label="メニューを閉じる"
+          onClick={() => setMenuOpen(false)}
+        />
+      ) : null}
+
+      <aside className={`sidebar${menuOpen ? " open" : ""}`}>
+        <div className="sidebar-head">
+          <div>
+            <div className="brand">
+              <span className="brand-mark">
+                <Icons.Brand size={16} strokeWidth={2.2} />
+              </span>
+              シフト調整アプリ
+            </div>
+            <div className="muted sidebar-user" style={{ fontSize: "0.85rem", marginTop: 4 }}>
+              {getStaffDisplayName(currentUser)}
+              （{roleText}） / {currentUser.team || "未所属"}
+            </div>
+            {currentUser.email ? (
+              <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+                {currentUser.email}
+              </div>
+            ) : null}
           </div>
-          <div className="muted sidebar-user" style={{ fontSize: "0.85rem", marginTop: 4 }}>
-            {getStaffDisplayName(currentUser)}
-            {isAdmin
-              ? `（管理者・${adminRoleLabel(currentUser.adminPermission)}）`
-              : "（アルバイト）"}{" "}
-            / {currentUser.team}
-          </div>
+          <button
+            type="button"
+            className="mobile-drawer-close"
+            onClick={() => setMenuOpen(false)}
+            aria-label="メニューを閉じる"
+          >
+            <Icons.Close size={18} />
+          </button>
         </div>
 
         {!usingSupabaseAuth ? (
@@ -112,7 +182,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   : pathname === link.href || pathname.startsWith(`${link.href}/`);
               const Icon = link.Icon;
               return (
-                <Link key={link.href} href={link.href} className={active ? "active" : undefined}>
+                <Link
+                  key={link.href}
+                  href={link.href}
+                  className={active ? "active" : undefined}
+                  onClick={() => setMenuOpen(false)}
+                >
                   <Icon size={18} className="nav-icon" />
                   {link.label}
                 </Link>
@@ -133,6 +208,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </aside>
 
       <main className="app-main">{children}</main>
+
+      <nav className="mobile-bottom-nav" aria-label="メインメニュー">
+        {links.map((link) => {
+          const active =
+            link.href === "/"
+              ? pathname === "/"
+              : pathname === link.href || pathname.startsWith(`${link.href}/`);
+          const Icon = link.Icon;
+          return (
+            <Link key={link.href} href={link.href} className={active ? "active" : undefined}>
+              <Icon size={20} className="nav-icon" />
+              <span>{link.label}</span>
+            </Link>
+          );
+        })}
+      </nav>
     </div>
   );
 }

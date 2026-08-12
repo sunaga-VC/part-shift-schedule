@@ -1,4 +1,5 @@
 import type { AppState, ConfirmedShift, DesiredShift, Staff } from "./types";
+import { isAttendanceStatus } from "./status";
 
 export const GOAL_BLOCK_TIMES = [
   { label: "10:00", start: "10:00", end: "12:00" },
@@ -12,6 +13,13 @@ export type GoalBlockSlots = [string[], string[], string[], string[]];
 export const DEFAULT_GOAL_DEPARTMENT = "リクルーティング";
 export const OFFICE_GOAL_DEPARTMENT = "事務";
 export const GOAL_SLOT_MINUTES = 2 * 60;
+
+/** 編集・削除不可の固定所属 */
+export const FIXED_DEPARTMENT_NAMES = ["リクルーティング"] as const;
+
+export function isFixedDepartmentName(name: string): boolean {
+  return (FIXED_DEPARTMENT_NAMES as readonly string[]).includes(name.trim());
+}
 
 export type DepartmentDaySummary = {
   department: string;
@@ -65,12 +73,9 @@ export function countGoalIcons(blocks: GoalBlockSlots): number {
   return blocks.reduce((total, slots) => total + slots.length, 0);
 }
 
+/** departments テーブル（または state.departments）に登録済みのものだけを返す（本部は除外） */
 export function getGoalDisplayDepartments(departments: string[]): string[] {
-  const list = departments.length > 0 ? [...departments] : [];
-  if (!list.includes(DEFAULT_GOAL_DEPARTMENT)) {
-    return [DEFAULT_GOAL_DEPARTMENT, ...list];
-  }
-  return list;
+  return departments.filter((department) => Boolean(department?.trim()) && department.trim() !== "本部");
 }
 
 export function buildGoalRequiredMinutesByDepartment(blocks: GoalBlockSlots): Record<string, number> {
@@ -93,7 +98,7 @@ export function buildConfirmedMinutesByDepartment(
   const totals: Record<string, number> = {};
 
   for (const shift of confirmedShifts) {
-    if (shift.date !== date || shift.status !== "confirmed") continue;
+    if (shift.date !== date || !isAttendanceStatus(shift.status)) continue;
     const staff = staffById.get(shift.staffId);
     if (!staff?.team) continue;
     totals[staff.team] = (totals[staff.team] ?? 0) + shift.actualMinutes;
@@ -143,7 +148,7 @@ function isDepartmentDayPublished(
     const confirmedShift = confirmedShifts.find((shift) => shift.date === date && shift.staffId === staff.id);
     const currentStatus = confirmedShift?.status ?? (desiredShift ? "adjusting" : "unconfirmed");
     if (currentStatus === "adjusting") return false;
-    if (confirmedShift?.publishedAt && confirmedShift.status === "confirmed") {
+    if (confirmedShift?.publishedAt && isAttendanceStatus(confirmedShift.status)) {
       hasPublishedConfirmed = true;
     }
   }

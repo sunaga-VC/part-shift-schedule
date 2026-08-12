@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { Icons } from "@/components/icons";
 import { useShift } from "@/context/ShiftContext";
+import { listOperableDepartmentNames } from "@/lib/shift/adminDepartments";
 import { getStaffDisplayName } from "@/lib/shift/display";
 import type { HomeMessage, Staff } from "@/lib/shift/types";
 
@@ -29,22 +30,22 @@ function isVisibleToWorker(message: HomeMessage, worker: Staff): boolean {
 }
 
 export function AdminHomeMessages() {
-  const { state, createHomeMessage, deleteHomeMessage } = useShift();
+  const { state, canManageMaster, createHomeMessage, deleteHomeMessage } = useShift();
+  const [editing, setEditing] = useState(false);
   const [body, setBody] = useState("");
   const [audience, setAudience] = useState<"all" | "team">("all");
   const [team, setTeam] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const teams = useMemo(
-    () =>
-      (state.departments.length > 0
-        ? state.departments
-        : Array.from(new Set(state.staffList.filter((s) => s.role === "worker").map((s) => s.team)))
-      ).filter((d) => d !== "本部"),
-    [state.departments, state.staffList]
+    () => listOperableDepartmentNames(state.departments),
+    [state.departments]
   );
 
   const messages = state.homeMessages ?? [];
+
+  // マネージャー / アルバイト管理者はメッセージ編集可
+  if (!canManageMaster) return null;
 
   const submit = () => {
     const result = createHomeMessage({
@@ -60,89 +61,138 @@ export function AdminHomeMessages() {
     setError(null);
   };
 
+  const closeEditing = () => {
+    setEditing(false);
+    setError(null);
+    setBody("");
+    setAudience("all");
+    setTeam("");
+  };
+
   return (
-    <section className="panel stack home-message-panel">
-      <div className="home-message-head">
-        <h2 className="page-title-with-icon" style={{ margin: 0 }}>
-          <Icons.Message size={18} className="page-title-icon" />
-          アルバイトへのメッセージ
-        </h2>
-        <span className="muted" style={{ fontSize: 12 }}>
-          送信するとアルバイトのホームに表示されます
-        </span>
-      </div>
-
-      <label className="home-message-compose">
-        <span className="muted" style={{ fontSize: 12, fontWeight: 700 }}>
-          本文
-        </span>
-        <textarea
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          rows={3}
-          placeholder="例: 来週の希望登録をお願いします。締め切りは金曜18時です。"
-        />
-      </label>
-
-      <div className="home-message-compose-row">
-        <label className="filter-field">
-          <span>宛先</span>
-          <select
-            value={audience === "all" ? "all" : team || teams[0] || ""}
-            onChange={(e) => {
-              const value = e.target.value;
-              if (value === "all") {
-                setAudience("all");
-                setTeam("");
-              } else {
-                setAudience("team");
-                setTeam(value);
-              }
-            }}
-          >
-            <option value="all">全員</option>
-            {teams.map((department) => (
-              <option key={department} value={department}>
-                {department}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button type="button" className="btn primary btn-action-green" onClick={submit}>
-          送信
-        </button>
-      </div>
-      {error ? <p className="badge warn" style={{ margin: 0 }}>{error}</p> : null}
-
-      <div className="home-message-list">
-        {messages.length === 0 ? (
-          <div className="muted home-message-empty">まだメッセージはありません</div>
+    <section className="panel stack">
+      <div className="home-section-head">
+        <h2 style={{ margin: 0 }}>アルバイトへのメッセージ</h2>
+        {editing ? (
+          <button type="button" className="btn" onClick={closeEditing}>
+            閉じる
+          </button>
         ) : (
-          messages.map((message) => {
-            const author = state.staffList.find((s) => s.id === message.createdByStaffId);
-            return (
-              <article key={message.id} className="home-message-card admin">
-                <div className="home-message-card-top">
-                  <div className="home-message-meta">
-                    <span className="home-chip">{audienceLabel(message)}</span>
-                    <span className="muted">{formatMessageTime(message.createdAt)}</span>
-                    <span className="muted">{getStaffDisplayName(author)}</span>
-                  </div>
-                  <button
-                    type="button"
-                    className="icon-btn danger"
-                    aria-label="削除"
-                    onClick={() => deleteHomeMessage(message.id)}
-                  >
-                    <Icons.Trash size={14} />
-                  </button>
-                </div>
-                <p className="home-message-body">{message.body}</p>
-              </article>
-            );
-          })
+          <button
+            type="button"
+            className="icon-btn"
+            aria-label="メッセージを編集"
+            title="メッセージを編集"
+            onClick={() => setEditing(true)}
+          >
+            <Icons.Pencil size={16} />
+          </button>
         )}
       </div>
+
+      {editing ? (
+        <>
+          <span className="muted" style={{ fontSize: 12 }}>
+            送信するとアルバイトのホームに表示されます
+          </span>
+
+          <label className="filter-field home-message-body-field">
+            <span>本文</span>
+            <textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              rows={3}
+              placeholder="例: 来週の希望登録をお願いします。締め切りは金曜18時です。"
+            />
+          </label>
+
+          <div className="filters dashboard-filters home-message-compose-row">
+            <label className="filter-field">
+              <span>宛先</span>
+              <select
+                value={audience === "all" ? "all" : team || teams[0] || ""}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  if (value === "all") {
+                    setAudience("all");
+                    setTeam("");
+                  } else {
+                    setAudience("team");
+                    setTeam(value);
+                  }
+                }}
+              >
+                <option value="all">全員</option>
+                {teams.map((department) => (
+                  <option key={department} value={department}>
+                    {department}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button type="button" className="btn primary" onClick={submit}>
+              送信
+            </button>
+          </div>
+          {error ? (
+            <p className="badge warn" style={{ margin: 0 }}>
+              {error}
+            </p>
+          ) : null}
+
+          <div className="home-message-list">
+            {messages.length === 0 ? (
+              <div className="muted">メッセージがありません</div>
+            ) : (
+              messages.map((message) => {
+                const author = state.staffList.find((s) => s.id === message.createdByStaffId);
+                return (
+                  <article key={message.id} className="list-item home-message-item">
+                    <div className="home-message-item-main">
+                      <div className="home-message-meta">
+                        <span className="badge">{audienceLabel(message)}</span>
+                        <span className="muted">{formatMessageTime(message.createdAt)}</span>
+                        <span className="muted">{getStaffDisplayName(author)}</span>
+                      </div>
+                      <p className="home-message-body">{message.body}</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="icon-btn danger"
+                      aria-label="削除"
+                      onClick={() => deleteHomeMessage(message.id)}
+                    >
+                      <Icons.Trash size={14} />
+                    </button>
+                  </article>
+                );
+              })
+            )}
+          </div>
+        </>
+      ) : (
+        <div className="home-message-list">
+          {messages.length === 0 ? (
+            <div className="muted">メッセージがありません</div>
+          ) : (
+            messages.map((message) => {
+              const author = state.staffList.find((s) => s.id === message.createdByStaffId);
+              return (
+                <article key={message.id} className="list-item home-message-item">
+                  <div className="home-message-item-main">
+                    <div className="home-message-meta">
+                      <span className="badge">{audienceLabel(message)}</span>
+                      <span className="muted">{formatMessageTime(message.createdAt)}</span>
+                      <span className="muted">{getStaffDisplayName(author)}</span>
+                    </div>
+                    <p className="home-message-body">{message.body}</p>
+                  </div>
+                </article>
+              );
+            })
+          )}
+        </div>
+      )}
     </section>
   );
 }
@@ -150,32 +200,31 @@ export function AdminHomeMessages() {
 export function WorkerHomeMessages() {
   const { state, currentUser } = useShift();
 
-  const messages = useMemo(
-    () => (state.homeMessages ?? []).filter((message) => isVisibleToWorker(message, currentUser)),
-    [currentUser, state.homeMessages]
-  );
+  const messages = useMemo(() => {
+    if (!currentUser) return [];
+    return (state.homeMessages ?? []).filter((message) => isVisibleToWorker(message, currentUser));
+  }, [currentUser, state.homeMessages]);
 
   if (messages.length === 0) return null;
 
   return (
-    <section className="panel stack home-message-panel worker">
-      <div className="home-message-head">
-        <h2 className="page-title-with-icon" style={{ margin: 0 }}>
-          <Icons.Message size={18} className="page-title-icon" />
-          お知らせ
-        </h2>
+    <section className="panel stack">
+      <div className="home-section-head">
+        <h2 style={{ margin: 0 }}>お知らせ</h2>
       </div>
       <div className="home-message-list">
         {messages.map((message) => {
           const author = state.staffList.find((s) => s.id === message.createdByStaffId);
           return (
-            <article key={message.id} className="home-message-card">
-              <div className="home-message-meta">
-                <span className="home-chip ok">{audienceLabel(message)}</span>
-                <span className="muted">{formatMessageTime(message.createdAt)}</span>
-                {author ? <span className="muted">{getStaffDisplayName(author)}</span> : null}
+            <article key={message.id} className="list-item home-message-item">
+              <div className="home-message-item-main">
+                <div className="home-message-meta">
+                  <span className="badge">{audienceLabel(message)}</span>
+                  <span className="muted">{formatMessageTime(message.createdAt)}</span>
+                  {author ? <span className="muted">{getStaffDisplayName(author)}</span> : null}
+                </div>
+                <p className="home-message-body">{message.body}</p>
               </div>
-              <p className="home-message-body">{message.body}</p>
             </article>
           );
         })}

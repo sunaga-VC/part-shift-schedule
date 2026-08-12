@@ -24,7 +24,8 @@ function mapSalaryRaises(rows: SalaryRaiseRow[] | null | undefined): SalaryRaise
 
 export function mapStaffProfile(
   row: ProfileWithRaises,
-  departmentNameById: Record<string, string>
+  departmentNameById: Record<string, string>,
+  managedTeams: string[] = []
 ): Staff {
   const team =
     row.departments?.name ||
@@ -38,6 +39,7 @@ export function mapStaffProfile(
     displayGivenName: row.display_given_name,
     iconLabel: row.icon_label ?? "",
     team,
+    managedTeams: row.role === "admin" ? managedTeams : [],
     password: "",
     role: row.role as StaffRole,
     adminPermission: row.admin_permission as AdminPermission,
@@ -52,6 +54,7 @@ export function mapStaffProfile(
     salaryHistory: mapSalaryRaises(row.salary_raises),
     email: row.email ?? "",
     googleEmail: row.google_email ?? "",
+    note: row.note ?? "",
   };
 }
 
@@ -67,7 +70,20 @@ export async function fetchStaffBootstrap(supabase: SupabaseClient): Promise<Sta
     data: { user },
     error: userError,
   } = await supabase.auth.getUser();
-  if (userError || !user) return null;
+  if (userError) {
+    const code = userError.code ?? "";
+    const message = userError.message ?? "";
+    if (
+      code === "refresh_token_not_found" ||
+      code === "session_not_found" ||
+      message.includes("Refresh Token")
+    ) {
+      // 失効したセッション Cookie を捨てる（コンソールの AuthApiError 対策）
+      await supabase.auth.signOut({ scope: "local" });
+    }
+    return null;
+  }
+  if (!user) return null;
 
   const { data: departments, error: deptError } = await supabase
     .from("departments")
@@ -76,51 +92,406 @@ export async function fetchStaffBootstrap(supabase: SupabaseClient): Promise<Sta
 
   if (deptError) {
     console.error("departments fetch failed", deptError);
+    if (deptError.message?.includes("permission denied")) {
+      console.error(
+        "departments の GRANT が不足しています。Supabase SQL Editor で grant_table_privileges マイグレーションを実行してください。"
+      );
+    }
   }
 
   const departmentRows = departments ?? [];
   const departmentNameById = Object.fromEntries(departmentRows.map((d) => [d.id, d.name]));
 
+  const { data: managedRows, error: managedFetchError } = await supabase
+    .from("staff_managed_departments")
+    .select("staff_id, department_id");
+
+  if (managedFetchError) {
+    console.warn(
+      "staff_managed_departments の取得に失敗しました。マイグレーション未適用の可能性があります:",
+      managedFetchError.message || managedFetchError
+    );
+  }
+
+  const managedTeamsByStaffId = new Map<string, string[]>();
+  for (const row of managedRows ?? []) {
+    const name = departmentNameById[row.department_id];
+    if (!name) continue;
+    const list = managedTeamsByStaffId.get(row.staff_id) ?? [];
+    list.push(name);
+    managedTeamsByStaffId.set(row.staff_id, list);
+  }
+
+  // departments 埋め込みは FK 追加後に曖昧になりやすいので使わず、department_id から名前解決する
   const { data: profiles, error: profileError } = await supabase
     .from("staff_profiles")
-    .select("*, salary_raises(*), departments(id, name)")
+    .select("*, salary_raises(*)")
     .order("last_name", { ascending: true });
 
   if (profileError) {
-    console.error("staff_profiles fetch failed", profileError);
-    // 最低限自分だけでも取る
-    const { data: self } = await supabase
+    const detail = [
+      profileError.message,
+      profileError.code,
+      profileError.details,
+      profileError.hint,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    console.error("staff_profiles fetch failed", detail || profileError);
+
+    const { data: self, error: selfError } = await supabase
       .from("staff_profiles")
-      .select("*, salary_raises(*), departments(id, name)")
+      .select("*, salary_raises(*)")
       .eq("id", user.id)
       .maybeSingle();
+    if (selfError) {
+      console.error(
+        "staff_profiles self fetch failed",
+        [selfError.message, selfError.code, selfError.details, selfError.hint].filter(Boolean).join(" | ") ||
+          selfError
+      );
+    }
     if (!self) return null;
     return {
       userId: user.id,
-      departments: departmentRows.map((d) => d.name),
-      staffList: [mapStaffProfile(self as unknown as ProfileWithRaises, departmentNameById)],
+      departments: departmentRows.map((d) => d.name).filter((name) => name !== "本部"),
+      staffList: [
+        mapStaffProfile(
+          self as unknown as ProfileWithRaises,
+          departmentNameById,
+          managedTeamsByStaffId.get(user.id) ?? []
+        ),
+      ],
     };
   }
 
   const staffList = (profiles as unknown as ProfileWithRaises[]).map((row) =>
-    mapStaffProfile(row, departmentNameById)
+    mapStaffProfile(row, departmentNameById, managedTeamsByStaffId.get(row.id) ?? [])
   );
 
   // 自分が一覧に無い場合は追加
   if (!staffList.some((s) => s.id === user.id)) {
     const { data: self } = await supabase
       .from("staff_profiles")
-      .select("*, salary_raises(*), departments(id, name)")
+      .select("*, salary_raises(*)")
       .eq("id", user.id)
       .maybeSingle();
     if (self) {
-      staffList.unshift(mapStaffProfile(self as unknown as ProfileWithRaises, departmentNameById));
+      staffList.unshift(
+        mapStaffProfile(
+          self as unknown as ProfileWithRaises,
+          departmentNameById,
+          managedTeamsByStaffId.get(user.id) ?? []
+        )
+      );
     }
   }
 
   return {
     userId: user.id,
-    departments: departmentRows.map((d) => d.name),
+    departments: departmentRows.map((d) => d.name).filter((name) => name !== "本部"),
     staffList,
   };
+}
+
+export type StaffPersistPatch = Partial<{
+  name: string;
+  firstName: string;
+  displayGivenName: boolean;
+  iconLabel: string;
+  team: string;
+  managedTeams: string[];
+  status: EmploymentStatus;
+  weeklyContractHours: number;
+  socialInsurance: boolean;
+  role: StaffRole;
+  adminPermission: AdminPermission;
+  hireDate: string;
+  contractStartDate: string;
+  contractEndDate: string;
+  contractRenewalMonths: number;
+  hourlyWage: number;
+  email: string;
+  googleEmail: string;
+  note: string;
+}>;
+
+function emptyToNull(value: string | undefined): string | null | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+/** staff_profiles を部分更新（マネージャー RLS） */
+export async function persistStaffUpdate(
+  supabase: SupabaseClient,
+  staffId: string,
+  patch: StaffPersistPatch
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const update: Database["public"]["Tables"]["staff_profiles"]["Update"] = {};
+
+  if (patch.name !== undefined) update.last_name = patch.name.trim();
+  if (patch.firstName !== undefined) update.first_name = patch.firstName.trim();
+  if (patch.displayGivenName !== undefined) update.display_given_name = patch.displayGivenName;
+  if (patch.iconLabel !== undefined) update.icon_label = patch.iconLabel;
+  if (patch.status !== undefined) update.status = patch.status;
+  if (patch.weeklyContractHours !== undefined) update.weekly_contract_hours = patch.weeklyContractHours;
+  if (patch.socialInsurance !== undefined) update.social_insurance = patch.socialInsurance;
+  if (patch.role !== undefined) update.role = patch.role;
+  if (patch.adminPermission !== undefined) update.admin_permission = patch.adminPermission;
+  if (patch.hireDate !== undefined) update.hire_date = emptyToNull(patch.hireDate);
+  if (patch.contractStartDate !== undefined) update.contract_start_date = emptyToNull(patch.contractStartDate);
+  if (patch.contractEndDate !== undefined) update.contract_end_date = emptyToNull(patch.contractEndDate);
+  if (patch.contractRenewalMonths !== undefined) {
+    update.contract_renewal_months = Math.max(1, patch.contractRenewalMonths);
+  }
+  if (patch.hourlyWage !== undefined) update.hourly_wage = patch.hourlyWage;
+  if (patch.email !== undefined) update.email = patch.email.trim().toLowerCase();
+  if (patch.googleEmail !== undefined) update.google_email = patch.googleEmail.trim();
+  if (patch.note !== undefined) update.note = patch.note;
+
+  if (patch.team !== undefined) {
+    const team = patch.team.trim();
+    if (!team) {
+      update.department_id = null;
+    } else {
+      const { data: department, error: deptError } = await supabase
+        .from("departments")
+        .select("id")
+        .eq("name", team)
+        .maybeSingle();
+      if (deptError) {
+        return { ok: false, message: deptError.message };
+      }
+      if (!department) {
+        return { ok: false, message: `所属「${team}」が見つかりません。先にチームを追加してください。` };
+      }
+      update.department_id = department.id;
+    }
+  }
+
+  if (Object.keys(update).length > 0) {
+    const { error } = await supabase.from("staff_profiles").update(update).eq("id", staffId);
+    if (error) {
+      return { ok: false, message: error.message };
+    }
+  }
+
+  if (patch.managedTeams !== undefined) {
+    const managedResult = await persistStaffManagedDepartments(supabase, staffId, patch.managedTeams);
+    if (!managedResult.ok) return managedResult;
+  }
+
+  return { ok: true };
+}
+
+export async function persistStaffManagedDepartments(
+  supabase: SupabaseClient,
+  staffId: string,
+  managedTeams: string[]
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const uniqueNames = [...new Set(managedTeams.map((name) => name.trim()).filter(Boolean))];
+  const departmentIds: string[] = [];
+
+  for (const name of uniqueNames) {
+    const { data, error } = await supabase.from("departments").select("id").eq("name", name).maybeSingle();
+    if (error) return { ok: false, message: error.message };
+    if (!data) return { ok: false, message: `所属「${name}」が見つかりません。` };
+    departmentIds.push(data.id);
+  }
+
+  const { error: deleteError } = await supabase
+    .from("staff_managed_departments")
+    .delete()
+    .eq("staff_id", staffId);
+  if (deleteError) {
+    if (deleteError.message.includes("staff_managed_departments")) {
+      return {
+        ok: false,
+        message:
+          "所属権限テーブル（staff_managed_departments）が未作成です。Supabase SQL Editor で 20260812220000_admin_managed_departments.sql を実行してください。",
+      };
+    }
+    return { ok: false, message: deleteError.message };
+  }
+
+  if (departmentIds.length === 0) return { ok: true };
+
+  const { error: insertError } = await supabase.from("staff_managed_departments").insert(
+    departmentIds.map((department_id) => ({ staff_id: staffId, department_id }))
+  );
+  if (insertError) {
+    if (insertError.message.includes("staff_managed_departments")) {
+      return {
+        ok: false,
+        message:
+          "所属権限テーブル（staff_managed_departments）が未作成です。Supabase SQL Editor で 20260812220000_admin_managed_departments.sql を実行してください。",
+      };
+    }
+    return { ok: false, message: insertError.message };
+  }
+  return { ok: true };
+}
+
+export async function persistDepartmentAdd(
+  supabase: SupabaseClient,
+  name: string
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from("departments").insert({
+    name,
+    is_fixed: false,
+    sort_order: 99,
+  });
+  if (error) {
+    // 既に同名がある場合は成功扱い
+    if (error.code === "23505") return { ok: true };
+    return { ok: false, message: error.message };
+  }
+  return { ok: true };
+}
+
+export async function persistDepartmentRename(
+  supabase: SupabaseClient,
+  oldName: string,
+  nextName: string
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { data, error } = await supabase
+    .from("departments")
+    .update({ name: nextName })
+    .eq("name", oldName)
+    .select("id");
+  if (error) {
+    return { ok: false, message: error.message };
+  }
+  if (!data?.length) {
+    return { ok: false, message: `所属「${oldName}」が見つかりません。` };
+  }
+  return { ok: true };
+}
+
+export async function persistDepartmentDelete(
+  supabase: SupabaseClient,
+  name: string
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { data: row, error: findError } = await supabase
+    .from("departments")
+    .select("id, is_fixed")
+    .eq("name", name)
+    .maybeSingle();
+  if (findError) {
+    return { ok: false, message: findError.message };
+  }
+  if (!row) {
+    return { ok: false, message: `所属「${name}」が見つかりません。` };
+  }
+  if (row.is_fixed) {
+    return { ok: false, message: "固定の所属は削除できません。" };
+  }
+  const { error } = await supabase.from("departments").delete().eq("id", row.id);
+  if (error) {
+    return { ok: false, message: error.message };
+  }
+  return { ok: true };
+}
+
+export async function persistSalaryRaise(
+  supabase: SupabaseClient,
+  staffId: string,
+  input: { effectiveDate: string; hourlyWage: number; note: string }
+): Promise<{ ok: true; id: string } | { ok: false; message: string }> {
+  const { data, error } = await supabase
+    .from("salary_raises")
+    .insert({
+      staff_id: staffId,
+      effective_date: input.effectiveDate,
+      hourly_wage: input.hourlyWage,
+      note: input.note,
+    })
+    .select("id")
+    .single();
+  if (error || !data) {
+    return { ok: false, message: error?.message || "昇給の保存に失敗しました。" };
+  }
+
+  const { error: wageError } = await supabase
+    .from("staff_profiles")
+    .update({ hourly_wage: input.hourlyWage })
+    .eq("id", staffId);
+  if (wageError) {
+    return { ok: false, message: wageError.message };
+  }
+  return { ok: true, id: data.id };
+}
+
+export async function persistSalaryRaiseUpdate(
+  supabase: SupabaseClient,
+  staffId: string,
+  raiseId: string,
+  input: { effectiveDate: string; hourlyWage: number; note: string }
+): Promise<{ ok: true; id: string } | { ok: false; message: string }> {
+  const effectiveDate = input.effectiveDate.trim();
+  const hourlyWage = input.hourlyWage;
+  const note = input.note.trim();
+
+  // 表示用の仮ID（初任給の合成行）は実レコードとして新規作成
+  if (raiseId.startsWith("initial-")) {
+    return persistSalaryRaise(supabase, staffId, { effectiveDate, hourlyWage, note });
+  }
+
+  const { error } = await supabase
+    .from("salary_raises")
+    .update({
+      effective_date: effectiveDate,
+      hourly_wage: hourlyWage,
+      note,
+    })
+    .eq("id", raiseId)
+    .eq("staff_id", staffId);
+
+  if (error) {
+    return { ok: false, message: error.message || "昇給履歴の更新に失敗しました。" };
+  }
+
+  const { data: rows, error: listError } = await supabase
+    .from("salary_raises")
+    .select("hourly_wage, effective_date")
+    .eq("staff_id", staffId)
+    .order("effective_date", { ascending: false })
+    .limit(1);
+
+  if (listError) {
+    return { ok: false, message: listError.message };
+  }
+
+  const latestWage = rows?.[0]?.hourly_wage;
+  if (typeof latestWage === "number") {
+    const { error: wageError } = await supabase
+      .from("staff_profiles")
+      .update({ hourly_wage: latestWage })
+      .eq("id", staffId);
+    if (wageError) {
+      return { ok: false, message: wageError.message };
+    }
+  }
+
+  return { ok: true, id: raiseId };
+}
+
+export async function persistStaffDelete(
+  supabase: SupabaseClient,
+  staffId: string
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  // 参照制約がある場合は退職扱いにフォールバック
+  const { error: deleteError } = await supabase.from("staff_profiles").delete().eq("id", staffId);
+  if (!deleteError) {
+    return { ok: true };
+  }
+  const { error: inactiveError } = await supabase
+    .from("staff_profiles")
+    .update({ status: "inactive" })
+    .eq("id", staffId);
+  if (inactiveError) {
+    return { ok: false, message: inactiveError.message || deleteError.message };
+  }
+  return { ok: true };
 }

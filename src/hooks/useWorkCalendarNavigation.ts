@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { toDateKeyJst } from "@/lib/shift/dates";
 
 type CalendarMonth = { year: number; month: number };
 
@@ -44,26 +45,35 @@ function shiftMonth(year: number, month: number, delta: number) {
 }
 
 export function getTodayKey(): string {
-  const today = new Date();
-  return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  return toDateKeyJst(new Date());
+}
+
+/** カレンダー選択の初期値。土日なら翌月曜 */
+export function getDefaultSelectedWorkDateKey(todayKey = getTodayKey()): string {
+  const d = new Date(`${todayKey}T12:00:00+09:00`);
+  const day = d.getDay();
+  if (day === 0) d.setDate(d.getDate() + 1);
+  if (day === 6) d.setDate(d.getDate() + 2);
+  return toDateKeyJst(d);
 }
 
 export function useWorkCalendarNavigation() {
   const todayKey = useMemo(() => getTodayKey(), []);
+  const defaultSelectedDateKey = useMemo(() => getDefaultSelectedWorkDateKey(todayKey), [todayKey]);
   const [calendarMonth, setCalendarMonth] = useState(() => {
-    const today = new Date();
+    const today = new Date(`${todayKey}T12:00:00+09:00`);
     return { year: today.getFullYear(), month: today.getMonth() };
   });
   const [rangeStartMonth, setRangeStartMonth] = useState(() => {
-    const today = new Date();
+    const today = new Date(`${todayKey}T12:00:00+09:00`);
     return shiftMonth(today.getFullYear(), today.getMonth(), -2);
   });
   const [rangeEndMonth, setRangeEndMonth] = useState(() => {
-    const today = new Date();
+    const today = new Date(`${todayKey}T12:00:00+09:00`);
     return shiftMonth(today.getFullYear(), today.getMonth(), 2);
   });
   const [monthPickerOpen, setMonthPickerOpen] = useState(false);
-  const [scrollToDateKey, setScrollToDateKey] = useState<string | null>(null);
+  const [scrollToDateKey, setScrollToDateKey] = useState<string | null>(() => defaultSelectedDateKey);
   const calendarScrollRef = useRef<HTMLDivElement>(null);
 
   const visibleDates = useMemo(
@@ -80,8 +90,8 @@ export function useWorkCalendarNavigation() {
   }, [visibleDates]);
 
   const currentWeekIndex = useMemo(
-    () => weekGroups.findIndex((group) => group.includes(todayKey)),
-    [todayKey, weekGroups]
+    () => weekGroups.findIndex((group) => group.includes(defaultSelectedDateKey)),
+    [defaultSelectedDateKey, weekGroups]
   );
 
   const ensureRangeIncludesMonth = (targetMonth: CalendarMonth) => {
@@ -129,13 +139,13 @@ export function useWorkCalendarNavigation() {
   }, [scrollToDateKey, weekGroups]);
 
   const handleGoToday = (onSelectDate: (dateKey: string) => void) => {
-    const today = new Date();
+    const today = new Date(`${todayKey}T12:00:00+09:00`);
     const nextMonth = { year: today.getFullYear(), month: today.getMonth() };
     setCalendarMonth(nextMonth);
     ensureRangeIncludesMonth(nextMonth);
-    onSelectDate(todayKey);
+    onSelectDate(defaultSelectedDateKey);
     setMonthPickerOpen(false);
-    setScrollToDateKey(todayKey);
+    setScrollToDateKey(defaultSelectedDateKey);
   };
 
   const handleSelectMonth = (month: number) => {
@@ -175,6 +185,7 @@ export function useWorkCalendarNavigation() {
 
   return {
     todayKey,
+    defaultSelectedDateKey,
     calendarMonth,
     monthPickerOpen,
     setMonthPickerOpen,

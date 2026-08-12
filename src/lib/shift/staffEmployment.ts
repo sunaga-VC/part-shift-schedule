@@ -16,7 +16,26 @@ export function getCurrentHourlyWage(staff: Staff): number {
 }
 
 export function sortSalaryHistory(history: SalaryRaise[]): SalaryRaise[] {
-  return [...history].sort((a, b) => b.effectiveDate.localeCompare(a.effectiveDate) || b.id.localeCompare(a.id));
+  return [...history].sort((a, b) => a.effectiveDate.localeCompare(b.effectiveDate) || a.id.localeCompare(b.id));
+}
+
+/** 表示用。履歴が空でも現行時給があれば初任給として先頭に出す */
+export function getSalaryHistoryForDisplay(staff: Staff): SalaryRaise[] {
+  const history = sortSalaryHistory(staff.salaryHistory ?? []);
+  if (history.length > 0) return history;
+
+  const wage = Number(staff.hourlyWage);
+  if (!Number.isFinite(wage) || wage <= 0) return [];
+
+  const effectiveDate = staff.hireDate || staff.contractStartDate || "";
+  return [
+    {
+      id: `initial-${staff.id}`,
+      effectiveDate,
+      hourlyWage: wage,
+      note: "初任給",
+    },
+  ];
 }
 
 export function formatYen(amount: number): string {
@@ -56,6 +75,27 @@ export function describeRenewalAlert(alert: ContractRenewalAlert): string {
     return alert.daysLeft === 0 ? "本日期限" : `残り${alert.daysLeft}日`;
   }
   return "";
+}
+
+/** 入社日から今日までの勤続を 1y11m 形式で返す */
+export function formatTenureLabel(hireDate: string, todayKey = toDateKeyJst(new Date())): string {
+  const startKey = hireDate?.trim();
+  if (!startKey) return "";
+  if (startKey > todayKey) return "0y0m";
+
+  const start = new Date(`${startKey}T00:00:00+09:00`);
+  const end = new Date(`${todayKey}T00:00:00+09:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return "";
+
+  let years = end.getFullYear() - start.getFullYear();
+  let months = end.getMonth() - start.getMonth();
+  if (end.getDate() < start.getDate()) months -= 1;
+  if (months < 0) {
+    years -= 1;
+    months += 12;
+  }
+  if (years < 0) return "0y0m";
+  return `${years}y${months}m`;
 }
 
 /** 契約開始日と更新月数から終了日を算出 */

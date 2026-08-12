@@ -6,17 +6,20 @@ import { Icons } from "@/components/icons";
 import { useShift } from "@/context/ShiftContext";
 import { toDateKeyJst } from "@/lib/shift/dates";
 import { getStaffFullName } from "@/lib/shift/display";
-import { DEFAULT_GOAL_DEPARTMENT } from "@/lib/shift/goal";
+import { isFixedDepartmentName, getGoalDepartmentLabel } from "@/lib/shift/goal";
 import {
   calcContractEndDate,
   calcRenewedContractPeriod,
   DEFAULT_CONTRACT_RENEWAL_MONTHS,
   describeRenewalAlert,
   formatContractHoursLabel,
+  formatTenureLabel,
   formatYen,
   getContractRenewalAlert,
-  sortSalaryHistory,
+  getSalaryHistoryForDisplay,
 } from "@/lib/shift/staffEmployment";
+import { listOperableDepartmentNames } from "@/lib/shift/adminDepartments";
+import { adminPermissionLabel } from "@/lib/shift/permissions";
 import type { AdminPermission, Staff } from "@/lib/shift/types";
 
 type NewStaffForm = {
@@ -33,9 +36,11 @@ type NewStaffForm = {
   contractRenewalMonths: string;
   hourlyWage: string;
   adminPermission: AdminPermission;
+  managedTeams: string[];
   socialInsurance: boolean;
   googleEmail: string;
   displayGivenName: boolean;
+  note: string;
 };
 
 type RaiseForm = {
@@ -43,6 +48,15 @@ type RaiseForm = {
   effectiveDate: string;
   hourlyWage: string;
   note: string;
+};
+
+type ContractPeriodForm = {
+  staffId: string;
+  staffName: string;
+  contractStartDate: string;
+  contractEndDate: string;
+  contractRenewalMonths: string;
+  renewedByButton?: boolean;
 };
 
 const emptyStaffForm = (team: string): NewStaffForm => ({
@@ -59,13 +73,34 @@ const emptyStaffForm = (team: string): NewStaffForm => ({
   contractRenewalMonths: String(DEFAULT_CONTRACT_RENEWAL_MONTHS),
   hourlyWage: "1100",
   adminPermission: "general",
+  managedTeams: [],
   socialInsurance: false,
   googleEmail: "",
   displayGivenName: false,
+  note: "",
 });
 
-function adminPermissionLabel(permission: AdminPermission): string {
-  return permission === "manager" ? "マネージャー" : "一般";
+function staffToForm(staff: Staff): NewStaffForm {
+  return {
+    name: staff.name,
+    firstName: staff.firstName,
+    email: staff.email,
+    password: "",
+    team: staff.team,
+    status: staff.status,
+    weeklyContractHours: String(staff.weeklyContractHours),
+    hireDate: staff.hireDate,
+    contractStartDate: staff.contractStartDate,
+    contractEndDate: staff.contractEndDate,
+    contractRenewalMonths: String(staff.contractRenewalMonths || DEFAULT_CONTRACT_RENEWAL_MONTHS),
+    hourlyWage: String(staff.hourlyWage ?? 0),
+    adminPermission: staff.adminPermission,
+    managedTeams: staff.managedTeams ?? [],
+    socialInsurance: staff.socialInsurance,
+    googleEmail: staff.googleEmail,
+    displayGivenName: staff.displayGivenName,
+    note: staff.note ?? "",
+  };
 }
 
 function formatSlashDate(date: string): string {
@@ -74,22 +109,30 @@ function formatSlashDate(date: string): string {
 }
 
 export function AdminMaster() {
-  const { state, isAdmin, canManageMaster, usingSupabaseAuth, updateStaff, createStaff, addSalaryRaise, deleteStaff, addDepartment, updateDepartment, deleteDepartment } =
-    useShift();
-  const departments = useMemo(() => {
-    const base =
-      state.departments.length > 0 ? state.departments : Array.from(new Set(state.staffList.map((s) => s.team)));
-    // Supabase 同期時は DB にある所属だけを使う（存在しない「リクルーティング」を先頭注入しない）
-    if (usingSupabaseAuth) return base;
-    return base.includes(DEFAULT_GOAL_DEPARTMENT) ? base : [DEFAULT_GOAL_DEPARTMENT, ...base];
-  }, [state.departments, state.staffList, usingSupabaseAuth]);
-
-  const teamDepartments = useMemo(
-    () => departments.filter((department) => department !== "本部"),
-    [departments]
+  const {
+    state,
+    isAdmin,
+    canManageMaster,
+    canManageAdminAccounts,
+    updateStaff,
+    createStaff,
+    changeStaffPassword,
+    addSalaryRaise,
+    updateSalaryRaise,
+    deleteStaff,
+    addDepartment,
+    updateDepartment,
+    deleteDepartment,
+  } = useShift();
+  // departments テーブル由来の一覧だけを使う（スタッフ所属や固定名の自動注入はしない）
+  const departments = useMemo(
+    () => listOperableDepartmentNames(state.departments),
+    [state.departments]
   );
 
-  const defaultStaffTeam = teamDepartments[0] ?? departments[0] ?? "";
+  const teamDepartments = departments;
+
+  const defaultStaffTeam = teamDepartments[0] ?? "";
 
   const [newDepartment, setNewDepartment] = useState("");
   const [tab, setTab] = useState<"staff" | "admin">("staff");
@@ -97,18 +140,27 @@ export function AdminMaster() {
   const [addAdminOpen, setAddAdminOpen] = useState(false);
   const [addTeamOpen, setAddTeamOpen] = useState(false);
   const [editingAdminId, setEditingAdminId] = useState<string | null>(null);
+  const [adminPasswordDraft, setAdminPasswordDraft] = useState("");
   const [editingDepartment, setEditingDepartment] = useState<string | null>(null);
   const [departmentDraft, setDepartmentDraft] = useState("");
   const [historyStaffId, setHistoryStaffId] = useState<string | null>(null);
-  const [detailStaffId, setDetailStaffId] = useState<string | null>(null);
   const [editingStaffId, setEditingStaffId] = useState<string | null>(null);
-  const [menuStaffId, setMenuStaffId] = useState<string | null>(null);
+  const [editStaffForm, setEditStaffForm] = useState<NewStaffForm | null>(null);
   const [teamFilter, setTeamFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "inactive">("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [raiseForm, setRaiseForm] = useState<RaiseForm | null>(null);
+  const [contractPeriodForm, setContractPeriodForm] = useState<ContractPeriodForm | null>(null);
+  const [renewedContractStaffIds, setRenewedContractStaffIds] = useState<Record<string, true>>({});
   const [raiseMessage, setRaiseMessage] = useState<string | null>(null);
   const [formMessage, setFormMessage] = useState<string | null>(null);
+  const [editingHistoryRaiseId, setEditingHistoryRaiseId] = useState<string | null>(null);
+  const [historyEditDraft, setHistoryEditDraft] = useState<{
+    effectiveDate: string;
+    hourlyWage: string;
+    note: string;
+  } | null>(null);
+  const [historyEditMessage, setHistoryEditMessage] = useState<string | null>(null);
   const [newStaff, setNewStaff] = useState<NewStaffForm>(() => emptyStaffForm(""));
   const todayKey = useMemo(() => toDateKeyJst(new Date()), []);
 
@@ -119,11 +171,12 @@ export function AdminMaster() {
   }, [defaultStaffTeam, newStaff.team]);
 
   useEffect(() => {
-    if (!menuStaffId) return;
-    const close = () => setMenuStaffId(null);
-    window.addEventListener("click", close);
-    return () => window.removeEventListener("click", close);
-  }, [menuStaffId]);
+    if (!canManageAdminAccounts && tab === "admin") {
+      setTab("staff");
+      setAddAdminOpen(false);
+      setEditingAdminId(null);
+    }
+  }, [canManageAdminAccounts, tab]);
 
   const workers = useMemo(
     () =>
@@ -143,7 +196,7 @@ export function AdminMaster() {
       if (teamFilter !== "all" && staff.team !== teamFilter) return false;
       if (statusFilter !== "all" && staff.status !== statusFilter) return false;
       if (!q) return true;
-      const hay = `${staff.name}${staff.firstName}${staff.team}${staff.googleEmail}`.toLowerCase();
+      const hay = `${staff.name}${staff.firstName}${staff.team}${staff.googleEmail}${staff.email}${staff.note ?? ""}`.toLowerCase();
       return hay.includes(q);
     });
   }, [workers, teamFilter, statusFilter, searchQuery]);
@@ -167,7 +220,6 @@ export function AdminMaster() {
   }, [workers, renewalAlerts]);
 
   const historyStaff = historyStaffId ? state.staffList.find((s) => s.id === historyStaffId) : null;
-  const detailStaff = detailStaffId ? state.staffList.find((s) => s.id === detailStaffId) : null;
 
   const handleAddStaff = async () => {
     const name = newStaff.name.trim();
@@ -184,8 +236,8 @@ export function AdminMaster() {
       newStaff.contractEndDate ||
       (contractStartDate ? calcContractEndDate(contractStartDate, contractRenewalMonths) : "");
 
-    if (!name || !firstName || !email || !password || !team || !Number.isFinite(weeklyContractHours)) {
-      setFormMessage("姓・名・メール・パスワード・所属は必須です。");
+    if (!name || !email || !password || !team || !Number.isFinite(weeklyContractHours)) {
+      setFormMessage("姓・メール・パスワード・所属は必須です。");
       return false;
     }
     if (!Number.isFinite(hourlyWage) || hourlyWage < 0) {
@@ -201,18 +253,20 @@ export function AdminMaster() {
       password,
       email,
       team,
+      managedTeams: [],
       role: "worker",
-      status: newStaff.status,
+      status: "active",
       weeklyContractHours,
       adminPermission: "general",
       socialInsurance: newStaff.socialInsurance,
-      googleEmail: newStaff.googleEmail.trim() || email,
+      googleEmail: email,
       hireDate,
       contractStartDate,
       contractEndDate,
       contractRenewalMonths,
       hourlyWage,
       salaryHistory: [],
+      note: newStaff.note.trim(),
     });
     if (!result.ok) {
       setFormMessage(result.message);
@@ -223,17 +277,70 @@ export function AdminMaster() {
     return true;
   };
 
-  const handleAddDepartment = () => {
-    const result = addDepartment(newDepartment);
-    if (result.ok) {
-      setNewDepartment("");
-      setAddTeamOpen(false);
-      setNewStaff((prev) => (prev.team ? prev : { ...prev, team: newDepartment.trim() }));
+  const openEditStaff = (staff: Staff) => {
+    setFormMessage(null);
+    setEditingStaffId(staff.id);
+    setEditStaffForm(staffToForm(staff));
+  };
+
+  const closeEditStaff = () => {
+    setFormMessage(null);
+    setEditingStaffId(null);
+    setEditStaffForm(null);
+  };
+
+  const handleSaveStaff = async () => {
+    if (!editingStaffId || !editStaffForm) return false;
+    const name = editStaffForm.name.trim();
+    const firstName = editStaffForm.firstName.trim();
+    const email = editStaffForm.email.trim();
+    const team = editStaffForm.team.trim();
+    const weeklyContractHours = Number(editStaffForm.weeklyContractHours);
+    const contractRenewalMonths =
+      Number(editStaffForm.contractRenewalMonths) || DEFAULT_CONTRACT_RENEWAL_MONTHS;
+    const hireDate = editStaffForm.hireDate;
+    const contractStartDate = editStaffForm.contractStartDate || hireDate;
+    const contractEndDate =
+      editStaffForm.contractEndDate ||
+      (contractStartDate ? calcContractEndDate(contractStartDate, contractRenewalMonths) : "");
+
+    if (!name || !email || !team || !Number.isFinite(weeklyContractHours)) {
+      setFormMessage("姓・メール・所属は必須です。");
+      return false;
     }
+
+    updateStaff(editingStaffId, {
+      name,
+      firstName,
+      displayGivenName: editStaffForm.displayGivenName,
+      email,
+      team,
+      weeklyContractHours,
+      socialInsurance: editStaffForm.socialInsurance,
+      googleEmail: email,
+      hireDate,
+      contractStartDate,
+      contractEndDate,
+      contractRenewalMonths,
+      note: editStaffForm.note.trim(),
+    });
+    setFormMessage(null);
+    return true;
+  };
+
+  const handleAddDepartment = async () => {
+    const result = await addDepartment(newDepartment);
+    if (!result.ok) {
+      setFormMessage(result.message);
+      return;
+    }
+    setFormMessage(null);
+    setNewDepartment("");
+    setAddTeamOpen(false);
+    setNewStaff((prev) => (prev.team ? prev : { ...prev, team: newDepartment.trim() }));
   };
 
   const openRaiseModal = (staff: Staff) => {
-    setMenuStaffId(null);
     setRaiseMessage(null);
     setRaiseForm({
       staffId: staff.id,
@@ -243,9 +350,48 @@ export function AdminMaster() {
     });
   };
 
-  const submitRaise = () => {
+  const openContractPeriodModal = (staff: Staff) => {
+    setFormMessage(null);
+    setContractPeriodForm({
+      staffId: staff.id,
+      staffName: getStaffFullName(staff),
+      contractStartDate: staff.contractStartDate,
+      contractEndDate: staff.contractEndDate,
+      contractRenewalMonths: String(staff.contractRenewalMonths || DEFAULT_CONTRACT_RENEWAL_MONTHS),
+      renewedByButton: false,
+    });
+  };
+
+  const handleSaveContractPeriod = () => {
+    if (!contractPeriodForm) return false;
+    const contractRenewalMonths =
+      Number(contractPeriodForm.contractRenewalMonths) || DEFAULT_CONTRACT_RENEWAL_MONTHS;
+    const contractStartDate = contractPeriodForm.contractStartDate;
+    const contractEndDate =
+      contractPeriodForm.contractEndDate ||
+      (contractStartDate ? calcContractEndDate(contractStartDate, contractRenewalMonths) : "");
+    const staffId = contractPeriodForm.staffId;
+    const renewedByButton = Boolean(contractPeriodForm.renewedByButton);
+
+    updateStaff(staffId, {
+      contractStartDate,
+      contractEndDate,
+      contractRenewalMonths,
+    });
+    setRenewedContractStaffIds((prev) => {
+      if (renewedByButton) return { ...prev, [staffId]: true };
+      const next = { ...prev };
+      delete next[staffId];
+      return next;
+    });
+    setFormMessage(null);
+    setContractPeriodForm(null);
+    return true;
+  };
+
+  const submitRaise = async () => {
     if (!raiseForm) return;
-    const result = addSalaryRaise(raiseForm.staffId, {
+    const result = await addSalaryRaise(raiseForm.staffId, {
       effectiveDate: raiseForm.effectiveDate,
       hourlyWage: Number(raiseForm.hourlyWage),
       note: raiseForm.note,
@@ -258,6 +404,36 @@ export function AdminMaster() {
     setRaiseMessage(null);
   };
 
+  const startHistoryEdit = (entry: { id: string; effectiveDate: string; hourlyWage: number; note: string }) => {
+    setHistoryEditMessage(null);
+    setEditingHistoryRaiseId(entry.id);
+    setHistoryEditDraft({
+      effectiveDate: entry.effectiveDate || todayKey,
+      hourlyWage: String(entry.hourlyWage || 0),
+      note: entry.note || "",
+    });
+  };
+
+  const cancelHistoryEdit = () => {
+    setEditingHistoryRaiseId(null);
+    setHistoryEditDraft(null);
+    setHistoryEditMessage(null);
+  };
+
+  const submitHistoryEdit = async () => {
+    if (!historyStaffId || !editingHistoryRaiseId || !historyEditDraft) return;
+    const result = await updateSalaryRaise(historyStaffId, editingHistoryRaiseId, {
+      effectiveDate: historyEditDraft.effectiveDate,
+      hourlyWage: Number(historyEditDraft.hourlyWage),
+      note: historyEditDraft.note,
+    });
+    if (!result.ok) {
+      setHistoryEditMessage(result.message);
+      return;
+    }
+    cancelHistoryEdit();
+  };
+
   if (!isAdmin || !canManageMaster) {
     return (
       <section className="panel stack">
@@ -268,7 +444,7 @@ export function AdminMaster() {
         <p style={{ margin: 0 }}>
           {!isAdmin
             ? "管理者ユーザーに切り替えてください。"
-            : "一般権限の管理者はマスタ管理を利用できません。マネージャー権限が必要です。"}
+            : "一般権限の管理者はマスタ管理を利用できません。マネージャーまたはアルバイト管理者権限が必要です。"}
         </p>
         <div className="actions" style={{ marginTop: 0 }}>
           <Link href="/" className="btn">
@@ -295,13 +471,15 @@ export function AdminMaster() {
           </Link>
         </div>
         <div className="staff-mgmt-tabs">
-          <button
-            type="button"
-            className={`staff-mgmt-tab ${tab === "admin" ? "active" : ""}`}
-            onClick={() => setTab("admin")}
-          >
-            管理者アカウント
-          </button>
+          {canManageAdminAccounts ? (
+            <button
+              type="button"
+              className={`staff-mgmt-tab ${tab === "admin" ? "active" : ""}`}
+              onClick={() => setTab("admin")}
+            >
+              管理者アカウント
+            </button>
+          ) : null}
           <button
             type="button"
             className={`staff-mgmt-tab ${tab === "staff" ? "active" : ""}`}
@@ -312,12 +490,14 @@ export function AdminMaster() {
         </div>
       </section>
 
-      {tab === "admin" ? (
+      {tab === "admin" && canManageAdminAccounts ? (
         <section className="panel stack">
           <div className="actions" style={{ justifyContent: "space-between", marginTop: 0 }}>
             <div className="stack" style={{ gap: 4 }}>
               <h2 style={{ margin: 0 }}>管理者アカウント</h2>
-              <div className="muted">管理者の名前・パスワード・権限を管理できます。一般権限はマスタ管理を開けません。</div>
+              <div className="muted">
+                管理者の名前・パスワード・権限・操作可能な所属を管理できます。所属はシフト調整のガント／確定の操作範囲になります。
+              </div>
             </div>
             <button type="button" className="btn primary btn-action-green" onClick={() => setAddAdminOpen(true)}>
               <Icons.Plus size={16} />
@@ -332,6 +512,7 @@ export function AdminMaster() {
                   <th>メール</th>
                   <th>パスワード</th>
                   <th>権限</th>
+                  <th>操作所属</th>
                   <th>操作</th>
                 </tr>
               </thead>
@@ -366,11 +547,33 @@ export function AdminMaster() {
                       </td>
                       <td>
                         {editingAdminId === admin.id ? (
-                          <input
-                            className="master-input"
-                            value={admin.password}
-                            onChange={(e) => updateStaff(admin.id, { password: e.target.value })}
-                          />
+                          <div className="password-change-row">
+                            <input
+                              className="master-input"
+                              type="password"
+                              value={adminPasswordDraft}
+                              onChange={(e) => setAdminPasswordDraft(e.target.value)}
+                              placeholder="新しいパスワード"
+                              autoComplete="new-password"
+                            />
+                            <button
+                              type="button"
+                              className="btn ghost-sm"
+                              onClick={() => {
+                                void (async () => {
+                                  const result = await changeStaffPassword(admin.id, adminPasswordDraft);
+                                  if (!result.ok) {
+                                    window.alert(result.message);
+                                    return;
+                                  }
+                                  setAdminPasswordDraft("");
+                                  window.alert("パスワードを更新しました。");
+                                })();
+                              }}
+                            >
+                              変更
+                            </button>
+                          </div>
                         ) : (
                           <span className="master-display">••••••</span>
                         )}
@@ -385,6 +588,7 @@ export function AdminMaster() {
                             }
                           >
                             <option value="manager">マネージャー</option>
+                            <option value="part_time_admin">アルバイト管理者</option>
                             <option value="general">一般</option>
                           </select>
                         ) : (
@@ -392,11 +596,42 @@ export function AdminMaster() {
                         )}
                       </td>
                       <td>
+                        {editingAdminId === admin.id ? (
+                          <div className="csv-dept-checklist admin-managed-teams">
+                            {departments.map((department) => (
+                              <label key={department} className="csv-dept-check">
+                                <input
+                                  type="checkbox"
+                                  checked={admin.managedTeams.includes(department)}
+                                  onChange={() => {
+                                    const next = admin.managedTeams.includes(department)
+                                      ? admin.managedTeams.filter((item) => item !== department)
+                                      : [...admin.managedTeams, department];
+                                    updateStaff(admin.id, {
+                                      managedTeams: next,
+                                      team: next[0] ?? "",
+                                    });
+                                  }}
+                                />
+                                <span>{department}</span>
+                              </label>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="master-display">
+                            {admin.managedTeams.length > 0 ? admin.managedTeams.join(" / ") : "未設定"}
+                          </span>
+                        )}
+                      </td>
+                      <td>
                         <div className="master-actions">
                           <button
                             type="button"
                             className="icon-btn"
-                            onClick={() => setEditingAdminId((prev) => (prev === admin.id ? null : admin.id))}
+                            onClick={() => {
+                              setAdminPasswordDraft("");
+                              setEditingAdminId((prev) => (prev === admin.id ? null : admin.id));
+                            }}
                             aria-label={editingAdminId === admin.id ? "編集終了" : "編集"}
                           >
                             {editingAdminId === admin.id ? <Icons.Check size={14} /> : <Icons.Pencil size={14} />}
@@ -404,7 +639,12 @@ export function AdminMaster() {
                           <button
                             type="button"
                             className="icon-btn danger"
-                            onClick={() => deleteStaff(admin.id)}
+                            onClick={() => {
+                              void (async () => {
+                                const result = await deleteStaff(admin.id);
+                                if (!result.ok) window.alert(result.message);
+                              })();
+                            }}
                             aria-label="削除"
                           >
                             <Icons.Trash size={14} />
@@ -498,257 +738,146 @@ export function AdminMaster() {
                 <thead>
                   <tr>
                     <th>スタッフ</th>
-                    <th>所属</th>
                     <th>状態</th>
                     <th>入社日</th>
                     <th>契約期間</th>
-                    <th>時給</th>
                     <th>契約h</th>
+                    <th>備考</th>
                     <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredWorkers.map((staff) => {
                     const alert = getContractRenewalAlert(staff, todayKey);
-                    const editing = editingStaffId === staff.id;
                     return (
                       <tr key={staff.id} className={alert.level !== "none" ? "row-shortage" : undefined}>
                         <td>
-                          {editing ? (
-                            <div className="staff-name-edit">
-                              <input
-                                className="master-input"
-                                value={staff.name}
-                                onChange={(e) => updateStaff(staff.id, { name: e.target.value })}
-                                placeholder="姓"
-                              />
-                              <input
-                                className="master-input"
-                                value={staff.firstName}
-                                onChange={(e) => updateStaff(staff.id, { firstName: e.target.value })}
-                                placeholder="名"
-                              />
-                            </div>
-                          ) : (
-                            <div>
+                          <div className="staff-cell-main">
+                            <span
+                              className="person-icon goal-person-icon staff-team-icon"
+                              title={staff.team || "未所属"}
+                            >
+                              {getGoalDepartmentLabel(staff.team || "未所属")}
+                            </span>
+                            <div className="staff-cell-text">
                               <div className="staff-cell-name">{getStaffFullName(staff)}</div>
                               {staff.email || staff.googleEmail ? (
                                 <div className="staff-cell-sub">{staff.email || staff.googleEmail}</div>
                               ) : null}
                             </div>
-                          )}
+                          </div>
                         </td>
                         <td>
-                          {editing ? (
-                            <select
-                              className="master-input"
-                              value={staff.team}
-                              onChange={(e) => updateStaff(staff.id, { team: e.target.value })}
-                            >
-                              {!teamDepartments.includes(staff.team) && staff.team ? (
-                                <option value={staff.team}>{staff.team}</option>
-                              ) : null}
-                              {teamDepartments.map((department) => (
-                                <option key={department} value={department}>
-                                  {department}
-                                </option>
-                              ))}
-                            </select>
-                          ) : (
-                            staff.team
-                          )}
+                          <select
+                            className={`emp-status-select ${staff.status}`}
+                            value={staff.status}
+                            onChange={(e) =>
+                              updateStaff(staff.id, { status: e.target.value as "active" | "inactive" })
+                            }
+                            aria-label="状態"
+                          >
+                            <option value="active">在籍</option>
+                            <option value="inactive">退職</option>
+                          </select>
                         </td>
                         <td>
-                          {editing ? (
-                            <select
-                              className="master-input"
-                              value={staff.status}
-                              onChange={(e) =>
-                                updateStaff(staff.id, { status: e.target.value as "active" | "inactive" })
-                              }
-                            >
-                              <option value="active">在籍</option>
-                              <option value="inactive">退職</option>
-                            </select>
-                          ) : (
-                            <span className={`emp-status ${staff.status}`}>
-                              {staff.status === "active" ? "在籍" : "退職"}
-                            </span>
-                          )}
+                          <div className="hire-date-cell">
+                            <span>{formatSlashDate(staff.hireDate)}</span>
+                            {staff.hireDate ? (
+                              <span className="tenure-label">{formatTenureLabel(staff.hireDate, todayKey)}</span>
+                            ) : null}
+                          </div>
                         </td>
                         <td>
-                          {editing ? (
-                            <input
-                              className="master-input"
-                              type="date"
-                              value={staff.hireDate}
-                              onChange={(e) => updateStaff(staff.id, { hireDate: e.target.value })}
-                            />
-                          ) : (
-                            formatSlashDate(staff.hireDate)
-                          )}
-                        </td>
-                        <td>
-                          {editing ? (
-                            <div className="master-contract-edit">
-                              <input
-                                className="master-input"
-                                type="date"
-                                value={staff.contractStartDate}
-                                onChange={(e) => {
-                                  const start = e.target.value;
-                                  updateStaff(staff.id, {
-                                    contractStartDate: start,
-                                    contractEndDate:
-                                      staff.contractEndDate ||
-                                      calcContractEndDate(start, staff.contractRenewalMonths),
-                                  });
-                                }}
-                              />
-                              <span className="muted">〜</span>
-                              <input
-                                className="master-input"
-                                type="date"
-                                value={staff.contractEndDate}
-                                onChange={(e) => updateStaff(staff.id, { contractEndDate: e.target.value })}
-                              />
+                          <div
+                            className={`contract-period-cell${
+                              renewedContractStaffIds[staff.id] ? " is-renewed" : ""
+                            }`}
+                          >
+                            {alert.level !== "none" ? (
                               <button
                                 type="button"
-                                className="btn ghost-sm contract-renew-btn"
-                                title="現行契約の翌月1日から3か月分を自動入力"
-                                onClick={() => {
-                                  const renewed = calcRenewedContractPeriod(
-                                    staff.contractEndDate,
-                                    staff.contractStartDate,
-                                    DEFAULT_CONTRACT_RENEWAL_MONTHS,
-                                    todayKey
-                                  );
-                                  updateStaff(staff.id, renewed);
-                                }}
+                                className="contract-period-edit-btn"
+                                onClick={() => openContractPeriodModal(staff)}
+                                aria-label="契約期間を編集"
+                                title="契約期間を編集"
                               >
-                                3か月更新済
+                                <Icons.Pencil size={12} />
                               </button>
-                              {alert.level !== "none" ? (
-                                <span className={`renewal-chip ${alert.level}`}>{describeRenewalAlert(alert)}</span>
-                              ) : null}
-                            </div>
-                          ) : (
-                            <div className="contract-period-cell">
-                              <span>
-                                {staff.contractStartDate || staff.contractEndDate
-                                  ? `${formatSlashDate(staff.contractStartDate)} 〜 ${formatSlashDate(staff.contractEndDate)}`
-                                  : "—"}
+                            ) : null}
+                            {staff.contractStartDate || staff.contractEndDate ? (
+                              <span className="contract-period-dates">
+                                <span>{formatSlashDate(staff.contractStartDate)}</span>
+                                <span>〜 {formatSlashDate(staff.contractEndDate)}</span>
                               </span>
-                              {alert.level !== "none" ? (
-                                <span className={`renewal-chip ${alert.level}`}>{describeRenewalAlert(alert)}</span>
-                              ) : null}
-                            </div>
-                          )}
+                            ) : (
+                              <span>—</span>
+                            )}
+                            {alert.level !== "none" ? (
+                              <span className={`renewal-chip ${alert.level}`}>{describeRenewalAlert(alert)}</span>
+                            ) : null}
+                          </div>
                         </td>
                         <td>
-                          {editing ? (
-                            <input
-                              className="master-input master-input-wage"
-                              type="number"
-                              min="0"
-                              step="10"
-                              value={staff.hourlyWage}
-                              onChange={(e) => updateStaff(staff.id, { hourlyWage: Number(e.target.value) || 0 })}
-                            />
-                          ) : (
-                            formatYen(staff.hourlyWage)
-                          )}
+                          <span className={staff.socialInsurance ? "insurance-label" : undefined}>
+                            {formatContractHoursLabel(staff)}
+                          </span>
                         </td>
-                        <td>
-                          {editing ? (
-                            <div className="master-contract-hours-edit">
-                              <select
-                                className="master-input"
-                                value={staff.socialInsurance ? "insured" : "hours"}
-                                onChange={(e) => {
-                                  const insured = e.target.value === "insured";
-                                  updateStaff(staff.id, { socialInsurance: insured });
-                                }}
-                              >
-                                <option value="hours">契約h</option>
-                                <option value="insured">社会保険あり</option>
-                              </select>
-                              {!staff.socialInsurance ? (
-                                <input
-                                  className="master-input"
-                                  type="number"
-                                  min="0"
-                                  step="0.5"
-                                  value={staff.weeklyContractHours}
-                                  onChange={(e) =>
-                                    updateStaff(staff.id, { weeklyContractHours: Number(e.target.value) || 0 })
-                                  }
-                                />
-                              ) : null}
-                            </div>
-                          ) : (
-                            <span className={staff.socialInsurance ? "insurance-label" : undefined}>
-                              {formatContractHoursLabel(staff)}
+                        <td className="staff-note-cell">
+                          {staff.note?.trim() ? (
+                            <span className="staff-note-text" title={staff.note.trim()}>
+                              {staff.note.trim()}
                             </span>
+                          ) : (
+                            <span className="muted">—</span>
                           )}
                         </td>
                         <td>
                           <div className="staff-row-actions">
-                            <button type="button" className="btn ghost-sm" onClick={() => setDetailStaffId(staff.id)}>
-                              詳細
+                            <button
+                              type="button"
+                              className="icon-btn"
+                              onClick={() => openRaiseModal(staff)}
+                              aria-label="昇給を記録"
+                              title="昇給を記録"
+                            >
+                              <Icons.Yen size={14} />
                             </button>
                             <button
                               type="button"
                               className="icon-btn"
-                              onClick={() => setEditingStaffId((prev) => (prev === staff.id ? null : staff.id))}
-                              aria-label={editing ? "編集終了" : "編集"}
-                              title={editing ? "編集終了" : "編集"}
+                              onClick={() => {
+                                cancelHistoryEdit();
+                                setHistoryStaffId(staff.id);
+                              }}
+                              aria-label="昇給履歴"
+                              title="昇給履歴"
                             >
-                              {editing ? <Icons.Check size={14} /> : <Icons.Pencil size={14} />}
+                              <Icons.History size={14} />
                             </button>
-                            <div className="staff-more-wrap">
-                              <button
-                                type="button"
-                                className="icon-btn"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setMenuStaffId((prev) => (prev === staff.id ? null : staff.id));
-                                }}
-                                aria-label="その他"
-                                title="その他"
-                              >
-                                <Icons.More size={14} />
-                              </button>
-                              {menuStaffId === staff.id ? (
-                                <div className="staff-more-menu" onClick={(e) => e.stopPropagation()}>
-                                  <button type="button" onClick={() => openRaiseModal(staff)}>
-                                    <Icons.Yen size={14} />
-                                    昇給を記録
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setMenuStaffId(null);
-                                      setHistoryStaffId(staff.id);
-                                    }}
-                                  >
-                                    <Icons.History size={14} />
-                                    昇給履歴
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="danger"
-                                    onClick={() => {
-                                      setMenuStaffId(null);
-                                      deleteStaff(staff.id);
-                                    }}
-                                  >
-                                    <Icons.Trash size={14} />
-                                    削除
-                                  </button>
-                                </div>
-                              ) : null}
-                            </div>
+                            <button
+                              type="button"
+                              className="icon-btn"
+                              onClick={() => openEditStaff(staff)}
+                              aria-label="編集"
+                              title="編集"
+                            >
+                              <Icons.Pencil size={14} />
+                            </button>
+                            <button
+                              type="button"
+                              className="icon-btn danger"
+                              onClick={() => {
+                                void (async () => {
+                                  const result = await deleteStaff(staff.id);
+                                  if (!result.ok) window.alert(result.message);
+                                })();
+                              }}
+                              aria-label="削除"
+                              title="削除"
+                            >
+                              <Icons.Trash size={14} />
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -756,7 +885,7 @@ export function AdminMaster() {
                   })}
                   {filteredWorkers.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="muted" style={{ textAlign: "center", padding: 24 }}>
+                      <td colSpan={7} className="muted" style={{ textAlign: "center", padding: 24 }}>
                         条件に一致するスタッフがいません
                       </td>
                     </tr>
@@ -764,12 +893,6 @@ export function AdminMaster() {
                 </tbody>
               </table>
             </div>
-            {editingStaffId ? (
-              <StaffExtraEdit
-                staff={state.staffList.find((s) => s.id === editingStaffId)}
-                onChange={(patch) => updateStaff(editingStaffId, patch)}
-              />
-            ) : null}
             <datalist id="department-options">
               {departments.map((department) => (
                 <option key={department} value={department} />
@@ -793,7 +916,7 @@ export function AdminMaster() {
             <div className="team-card-grid">
               {teamDepartments.map((department) => {
                 const isEditing = editingDepartment === department;
-                const isFixedDepartment = department === DEFAULT_GOAL_DEPARTMENT;
+                const isFixedDepartment = isFixedDepartmentName(department);
                 const memberCount = workers.filter((s) => s.team === department).length;
                 return (
                   <article key={department} className="team-card">
@@ -819,13 +942,19 @@ export function AdminMaster() {
                               type="button"
                               className="icon-btn"
                               onClick={() => {
-                                if (isEditing) {
-                                  updateDepartment(department, departmentDraft);
-                                  setEditingDepartment(null);
-                                } else {
-                                  setEditingDepartment(department);
-                                  setDepartmentDraft(department);
-                                }
+                                void (async () => {
+                                  if (isEditing) {
+                                    const result = await updateDepartment(department, departmentDraft);
+                                    if (!result.ok) {
+                                      window.alert(result.message);
+                                      return;
+                                    }
+                                    setEditingDepartment(null);
+                                  } else {
+                                    setEditingDepartment(department);
+                                    setDepartmentDraft(department);
+                                  }
+                                })();
                               }}
                               aria-label={isEditing ? "保存" : "編集"}
                             >
@@ -835,8 +964,14 @@ export function AdminMaster() {
                               type="button"
                               className="icon-btn danger"
                               onClick={() => {
-                                deleteDepartment(department);
-                                if (editingDepartment === department) setEditingDepartment(null);
+                                void (async () => {
+                                  const result = await deleteDepartment(department);
+                                  if (!result.ok) {
+                                    window.alert(result.message);
+                                    return;
+                                  }
+                                  if (editingDepartment === department) setEditingDepartment(null);
+                                })();
                               }}
                               aria-label="削除"
                             >
@@ -873,52 +1008,27 @@ export function AdminMaster() {
         />
       )}
 
-      {detailStaff && (
-        <div className="modal-backdrop" onClick={() => setDetailStaffId(null)}>
-          <div className="modal-panel modal-panel-wide" onClick={(e) => e.stopPropagation()}>
-            <div className="staff-detail-head">
-              <div>
-                <h3 style={{ margin: 0 }}>{getStaffFullName(detailStaff)}</h3>
-                <div className="muted">{detailStaff.team}</div>
-              </div>
-              <span className={`emp-status ${detailStaff.status}`}>
-                {detailStaff.status === "active" ? "在籍" : "退職"}
-              </span>
-            </div>
-            <div className="staff-detail-grid">
-              <DetailItem label="入社日" value={formatSlashDate(detailStaff.hireDate)} />
-              <DetailItem
-                label="契約期間"
-                value={
-                  detailStaff.contractStartDate || detailStaff.contractEndDate
-                    ? `${formatSlashDate(detailStaff.contractStartDate)} 〜 ${formatSlashDate(detailStaff.contractEndDate)}`
-                    : "—"
-                }
-              />
-              <DetailItem label="更新間隔" value={`${detailStaff.contractRenewalMonths || 3}か月`} />
-              <DetailItem label="時給" value={formatYen(detailStaff.hourlyWage)} />
-              <DetailItem label="契約h" value={formatContractHoursLabel(detailStaff)} />
-              <DetailItem label="ログイン用メール" value={detailStaff.email || "—"} />
-              <DetailItem label="Googleアドレス" value={detailStaff.googleEmail || "—"} />
-            </div>
-            <div className="actions" style={{ justifyContent: "flex-end" }}>
-              <button
-                type="button"
-                className="btn primary btn-action-green"
-                onClick={() => {
-                  setDetailStaffId(null);
-                  setEditingStaffId(detailStaff.id);
-                }}
-              >
-                編集
-              </button>
-              <button type="button" className="btn" onClick={() => setDetailStaffId(null)}>
-                閉じる
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {editingStaffId && editStaffForm ? (
+        <StaffFormModal
+          title="スタッフ編集"
+          mode="edit"
+          form={editStaffForm}
+          setForm={(updater) => {
+            setEditStaffForm((prev) => {
+              if (!prev) return prev;
+              return typeof updater === "function" ? updater(prev) : updater;
+            });
+          }}
+          departments={departments}
+          message={formMessage}
+          onChangePassword={async (password) => changeStaffPassword(editingStaffId, password)}
+          onCancel={closeEditStaff}
+          onSubmit={async () => {
+            if (await handleSaveStaff()) closeEditStaff();
+          }}
+          submitLabel="保存"
+        />
+      ) : null}
 
       {addTeamOpen && (
         <div className="modal-backdrop" onClick={() => setAddTeamOpen(false)}>
@@ -935,8 +1045,13 @@ export function AdminMaster() {
                 />
               </label>
             </div>
+            {formMessage ? <p className="badge warn">{formMessage}</p> : null}
             <div className="actions" style={{ justifyContent: "flex-end" }}>
-              <button type="button" className="btn primary btn-action-green" onClick={handleAddDepartment}>
+              <button
+                type="button"
+                className="btn primary btn-action-green"
+                onClick={() => void handleAddDepartment()}
+              >
                 追加
               </button>
               <button type="button" className="btn" onClick={() => setAddTeamOpen(false)}>
@@ -982,12 +1097,35 @@ export function AdminMaster() {
                   }
                 >
                   <option value="manager">マネージャー</option>
+                  <option value="part_time_admin">アルバイト管理者</option>
                   <option value="general">一般</option>
                 </select>
               </label>
+              <div className="stack" style={{ gap: 6 }}>
+                <span>操作できる所属（複数可）</span>
+                <div className="csv-dept-checklist">
+                  {departments.map((department) => (
+                    <label key={department} className="csv-dept-check">
+                      <input
+                        type="checkbox"
+                        checked={newStaff.managedTeams.includes(department)}
+                        onChange={() => {
+                          setNewStaff((prev) => {
+                            const next = prev.managedTeams.includes(department)
+                              ? prev.managedTeams.filter((item) => item !== department)
+                              : [...prev.managedTeams, department];
+                            return { ...prev, managedTeams: next, team: next[0] ?? "" };
+                          });
+                        }}
+                      />
+                      <span>{department}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
             </div>
             <p className="muted" style={{ margin: 0 }}>
-              一般権限の管理者はシフト調整などは利用できますが、マスタ管理は開けません。
+              選択した所属のシフト調整（ガント・確定）を操作できます。一般はマスタ管理不可。アルバイト管理者は管理者アカウントにアクセスできません。
             </p>
             {formMessage ? <p className="badge warn">{formMessage}</p> : null}
             <div className="actions" style={{ justifyContent: "flex-end" }}>
@@ -1002,6 +1140,10 @@ export function AdminMaster() {
                     setFormMessage("名前・メール・パスワードは必須です。");
                     return;
                   }
+                  if (newStaff.managedTeams.length === 0) {
+                    setFormMessage("操作できる所属を1つ以上選択してください。");
+                    return;
+                  }
                   const result = await createStaff({
                     name,
                     firstName: "",
@@ -1009,7 +1151,8 @@ export function AdminMaster() {
                     iconLabel: "",
                     password,
                     email,
-                    team: "本部",
+                    team: newStaff.managedTeams[0],
+                    managedTeams: newStaff.managedTeams,
                     role: "admin",
                     adminPermission: newStaff.adminPermission,
                     status: "active",
@@ -1022,6 +1165,7 @@ export function AdminMaster() {
                     contractRenewalMonths: DEFAULT_CONTRACT_RENEWAL_MONTHS,
                     hourlyWage: 0,
                     salaryHistory: [],
+                    note: "",
                   });
                   if (!result.ok) {
                     setFormMessage(result.message);
@@ -1094,8 +1238,121 @@ export function AdminMaster() {
         </div>
       )}
 
+      {contractPeriodForm ? (
+        <div className="modal-backdrop" onClick={() => setContractPeriodForm(null)}>
+          <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0 }}>契約期間の編集</h3>
+            <p className="muted" style={{ marginTop: 0 }}>
+              {contractPeriodForm.staffName}
+            </p>
+            <div className="form-grid master-form-grid staff-form-grid">
+              <div className="staff-form-renew staff-form-span contract-period-renew-block">
+                <button
+                  type="button"
+                  className="btn primary btn-action-green contract-period-renew-btn"
+                  title="現行契約の翌月1日から3か月分を自動入力"
+                  onClick={() => {
+                    setContractPeriodForm((prev) => {
+                      if (!prev) return prev;
+                      const renewed = calcRenewedContractPeriod(
+                        prev.contractEndDate,
+                        prev.contractStartDate,
+                        DEFAULT_CONTRACT_RENEWAL_MONTHS
+                      );
+                      return {
+                        ...prev,
+                        contractStartDate: renewed.contractStartDate,
+                        contractEndDate: renewed.contractEndDate,
+                        contractRenewalMonths: String(renewed.contractRenewalMonths),
+                        renewedByButton: true,
+                      };
+                    });
+                  }}
+                >
+                  3か月更新
+                </button>
+                <span className="contract-period-renew-hint">
+                  終了月の翌月1日〜3か月を自動入力
+                </span>
+              </div>
+              <label className={contractPeriodForm.renewedByButton ? "contract-period-field-renewed" : undefined}>
+                契約開始日
+                <input
+                  type="date"
+                  value={contractPeriodForm.contractStartDate}
+                  onChange={(e) => {
+                    const contractStartDate = e.target.value;
+                    setContractPeriodForm((prev) => {
+                      if (!prev) return prev;
+                      const months =
+                        Number(prev.contractRenewalMonths) || DEFAULT_CONTRACT_RENEWAL_MONTHS;
+                      return {
+                        ...prev,
+                        contractStartDate,
+                        contractEndDate:
+                          prev.contractEndDate || calcContractEndDate(contractStartDate, months),
+                        renewedByButton: false,
+                      };
+                    });
+                  }}
+                />
+              </label>
+              <label className={contractPeriodForm.renewedByButton ? "contract-period-field-renewed" : undefined}>
+                契約終了日
+                <input
+                  type="date"
+                  value={contractPeriodForm.contractEndDate}
+                  onChange={(e) =>
+                    setContractPeriodForm((prev) =>
+                      prev
+                        ? { ...prev, contractEndDate: e.target.value, renewedByButton: false }
+                        : prev
+                    )
+                  }
+                />
+              </label>
+              <label>
+                更新間隔（か月）
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={contractPeriodForm.contractRenewalMonths}
+                  onChange={(e) =>
+                    setContractPeriodForm((prev) =>
+                      prev ? { ...prev, contractRenewalMonths: e.target.value } : prev
+                    )
+                  }
+                />
+              </label>
+            </div>
+            {formMessage ? <p className="badge warn">{formMessage}</p> : null}
+            <div className="actions" style={{ justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                className="btn primary btn-action-green"
+                onClick={() => {
+                  handleSaveContractPeriod();
+                }}
+              >
+                保存
+              </button>
+              <button type="button" className="btn" onClick={() => setContractPeriodForm(null)}>
+                キャンセル
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {historyStaff && (
-        <div className="modal-backdrop" onClick={() => setHistoryStaffId(null)}>
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            cancelHistoryEdit();
+            setHistoryStaffId(null);
+          }}
+        >
           <div className="modal-panel modal-panel-wide" onClick={(e) => e.stopPropagation()}>
             <h3 style={{ marginTop: 0 }}>
               昇給履歴（{historyStaff.name}
@@ -1111,19 +1368,106 @@ export function AdminMaster() {
                     <th>適用日</th>
                     <th>時給</th>
                     <th>備考</th>
+                    <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {sortSalaryHistory(historyStaff.salaryHistory).map((entry) => (
-                    <tr key={entry.id}>
-                      <td>{entry.effectiveDate ? formatSlashDate(entry.effectiveDate) : "—"}</td>
-                      <td>{formatYen(entry.hourlyWage)}</td>
-                      <td>{entry.note || "—"}</td>
-                    </tr>
-                  ))}
-                  {historyStaff.salaryHistory.length === 0 ? (
+                  {getSalaryHistoryForDisplay(historyStaff).map((entry) => {
+                    const editing = editingHistoryRaiseId === entry.id;
+                    return (
+                      <tr key={entry.id}>
+                        <td>
+                          {editing && historyEditDraft ? (
+                            <input
+                              className="master-input"
+                              type="date"
+                              value={historyEditDraft.effectiveDate}
+                              onChange={(e) =>
+                                setHistoryEditDraft((prev) =>
+                                  prev ? { ...prev, effectiveDate: e.target.value } : prev
+                                )
+                              }
+                            />
+                          ) : entry.effectiveDate ? (
+                            formatSlashDate(entry.effectiveDate)
+                          ) : (
+                            "—"
+                          )}
+                        </td>
+                        <td>
+                          {editing && historyEditDraft ? (
+                            <input
+                              className="master-input master-input-wage"
+                              type="number"
+                              min="0"
+                              step="10"
+                              value={historyEditDraft.hourlyWage}
+                              onChange={(e) =>
+                                setHistoryEditDraft((prev) =>
+                                  prev ? { ...prev, hourlyWage: e.target.value } : prev
+                                )
+                              }
+                            />
+                          ) : (
+                            formatYen(entry.hourlyWage)
+                          )}
+                        </td>
+                        <td>
+                          {editing && historyEditDraft ? (
+                            <input
+                              className="master-input"
+                              value={historyEditDraft.note}
+                              onChange={(e) =>
+                                setHistoryEditDraft((prev) => (prev ? { ...prev, note: e.target.value } : prev))
+                              }
+                              placeholder="初任給 / 昇給 など"
+                            />
+                          ) : (
+                            entry.note || "—"
+                          )}
+                        </td>
+                        <td>
+                          <div className="staff-row-actions">
+                            {editing ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="icon-btn"
+                                  onClick={() => void submitHistoryEdit()}
+                                  aria-label="保存"
+                                  title="保存"
+                                >
+                                  <Icons.Check size={14} />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="icon-btn"
+                                  onClick={cancelHistoryEdit}
+                                  aria-label="キャンセル"
+                                  title="キャンセル"
+                                >
+                                  <Icons.Close size={14} />
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                className="icon-btn"
+                                onClick={() => startHistoryEdit(entry)}
+                                aria-label="編集"
+                                title="編集"
+                              >
+                                <Icons.Pencil size={14} />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {getSalaryHistoryForDisplay(historyStaff).length === 0 ? (
                     <tr>
-                      <td colSpan={3} className="muted">
+                      <td colSpan={4} className="muted">
                         履歴はまだありません
                       </td>
                     </tr>
@@ -1131,30 +1475,22 @@ export function AdminMaster() {
                 </tbody>
               </table>
             </div>
+            {historyEditMessage ? <p className="badge warn">{historyEditMessage}</p> : null}
             <div className="actions" style={{ justifyContent: "flex-end" }}>
               <button
                 type="button"
-                className="btn primary btn-action-green"
-                onClick={() => openRaiseModal(historyStaff)}
+                className="btn"
+                onClick={() => {
+                  cancelHistoryEdit();
+                  setHistoryStaffId(null);
+                }}
               >
-                昇給を記録
-              </button>
-              <button type="button" className="btn" onClick={() => setHistoryStaffId(null)}>
                 閉じる
               </button>
             </div>
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function DetailItem({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="staff-detail-item">
-      <div className="staff-detail-label">{label}</div>
-      <div className="staff-detail-value">{value}</div>
     </div>
   );
 }
@@ -1168,6 +1504,8 @@ function StaffFormModal({
   onCancel,
   onSubmit,
   submitLabel,
+  mode = "create",
+  onChangePassword,
 }: {
   title: string;
   form: NewStaffForm;
@@ -1177,23 +1515,46 @@ function StaffFormModal({
   onCancel: () => void;
   onSubmit: () => void | Promise<void>;
   submitLabel: string;
+  mode?: "create" | "edit";
+  onChangePassword?: (
+    password: string
+  ) => Promise<{ ok: true } | { ok: false; message: string }>;
 }) {
   return (
     <div className="modal-backdrop" onClick={onCancel}>
       <div className="modal-panel modal-panel-wide" onClick={(e) => e.stopPropagation()}>
         <h3 style={{ marginTop: 0 }}>{title}</h3>
         <div className="form-grid master-form-grid staff-form-grid">
-          <label>
-            姓
-            <input value={form.name} onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))} />
-          </label>
-          <label>
-            名
-            <input
-              value={form.firstName}
-              onChange={(e) => setForm((prev) => ({ ...prev, firstName: e.target.value }))}
-            />
-          </label>
+          <div className="staff-form-name-row">
+            <label className="staff-form-name">
+              姓（必須）
+              <input
+                type="text"
+                value={form.name}
+                onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+                placeholder="例: 山田"
+                autoFocus
+                required
+              />
+            </label>
+            <label className="staff-form-name">
+              名
+              <input
+                type="text"
+                value={form.firstName}
+                onChange={(e) => setForm((prev) => ({ ...prev, firstName: e.target.value }))}
+                placeholder="例: 太郎"
+              />
+            </label>
+            <div className="staff-form-name-check">
+              <span>名表示</span>
+              <input
+                type="checkbox"
+                checked={form.displayGivenName}
+                onChange={(e) => setForm((prev) => ({ ...prev, displayGivenName: e.target.checked }))}
+              />
+            </div>
+          </div>
           <label>
             ログイン用メール
             <input
@@ -1203,90 +1564,119 @@ function StaffFormModal({
               placeholder="staff@example.com"
             />
           </label>
-          <label>
-            ログインパスワード
-            <input
-              type="password"
-              value={form.password}
-              onChange={(e) => setForm((prev) => ({ ...prev, password: e.target.value }))}
-            />
-          </label>
-          <label>
-            所属
-            <select value={form.team} onChange={(e) => setForm((prev) => ({ ...prev, team: e.target.value }))}>
-              {departments
-                .filter((department) => department !== "本部")
-                .map((department) => (
+          {mode === "edit" ? (
+            <label>
+              パスワード変更
+              <div className="password-change-row">
+                <input
+                  type="password"
+                  value={form.password}
+                  onChange={(e) => setForm((prev) => ({ ...prev, password: e.target.value }))}
+                  placeholder="新しいパスワード（6文字以上）"
+                  autoComplete="new-password"
+                />
+                <button
+                  type="button"
+                  className="btn ghost-sm"
+                  onClick={() => {
+                    void (async () => {
+                      if (!onChangePassword) return;
+                      const result = await onChangePassword(form.password);
+                      if (!result.ok) {
+                        window.alert(result.message);
+                        return;
+                      }
+                      setForm((prev) => ({ ...prev, password: "" }));
+                      window.alert("パスワードを更新しました。");
+                    })();
+                  }}
+                >
+                  変更
+                </button>
+              </div>
+            </label>
+          ) : (
+            <label>
+              ログインパスワード
+              <input
+                type="password"
+                value={form.password}
+                onChange={(e) => setForm((prev) => ({ ...prev, password: e.target.value }))}
+              />
+            </label>
+          )}
+          <div className="staff-form-pair-row">
+            <label>
+              所属
+              <select value={form.team} onChange={(e) => setForm((prev) => ({ ...prev, team: e.target.value }))}>
+                {departments.map((department) => (
                   <option key={department} value={department}>
                     {department}
                   </option>
                 ))}
-              {form.team && !departments.filter((d) => d !== "本部").includes(form.team) ? (
-                <option value={form.team}>{form.team}</option>
-              ) : null}
-            </select>
-          </label>
-          <label>
-            状態
-            <select
-              value={form.status}
-              onChange={(e) => setForm((prev) => ({ ...prev, status: e.target.value as "active" | "inactive" }))}
-            >
-              <option value="active">在籍</option>
-              <option value="inactive">退職</option>
-            </select>
-          </label>
-          <label>
-            契約時間
-            <select
-              value={form.socialInsurance ? "insured" : "hours"}
-              onChange={(e) => setForm((prev) => ({ ...prev, socialInsurance: e.target.value === "insured" }))}
-            >
-              <option value="hours">契約hを入力</option>
-              <option value="insured">社会保険あり</option>
-            </select>
-          </label>
-          {!form.socialInsurance ? (
+                {form.team && !departments.includes(form.team) ? (
+                  <option value={form.team}>{form.team}</option>
+                ) : null}
+              </select>
+            </label>
             <label>
-              契約時間（h）
+              入社日
               <input
-                type="number"
-                min="0"
-                step="0.5"
-                value={form.weeklyContractHours}
-                onChange={(e) => setForm((prev) => ({ ...prev, weeklyContractHours: e.target.value }))}
+                type="date"
+                value={form.hireDate}
+                onChange={(e) => {
+                  const hireDate = e.target.value;
+                  setForm((prev) => {
+                    const contractStartDate = prev.contractStartDate || hireDate;
+                    const months = Number(prev.contractRenewalMonths) || DEFAULT_CONTRACT_RENEWAL_MONTHS;
+                    return {
+                      ...prev,
+                      hireDate,
+                      contractStartDate,
+                      contractEndDate: prev.contractEndDate || calcContractEndDate(contractStartDate, months),
+                    };
+                  });
+                }}
               />
             </label>
-          ) : null}
-          <label>
-            Googleアドレス
-            <input
-              type="email"
-              value={form.googleEmail}
-              onChange={(e) => setForm((prev) => ({ ...prev, googleEmail: e.target.value }))}
-              placeholder="未入力ならログイン用メールを使用"
-            />
-          </label>
-          <label>
-            入社日
-            <input
-              type="date"
-              value={form.hireDate}
-              onChange={(e) => {
-                const hireDate = e.target.value;
-                setForm((prev) => {
-                  const contractStartDate = prev.contractStartDate || hireDate;
-                  const months = Number(prev.contractRenewalMonths) || DEFAULT_CONTRACT_RENEWAL_MONTHS;
-                  return {
-                    ...prev,
-                    hireDate,
-                    contractStartDate,
-                    contractEndDate: prev.contractEndDate || calcContractEndDate(contractStartDate, months),
-                  };
-                });
-              }}
-            />
-          </label>
+          </div>
+          <div className="staff-form-pair-row">
+            <div className="staff-insurance-field">
+              <span className="staff-insurance-label">社保有無</span>
+              <span className="staff-insurance-check-group">
+                <label className="staff-insurance-option">
+                  <input
+                    type="checkbox"
+                    checked={form.socialInsurance}
+                    onChange={() => setForm((prev) => ({ ...prev, socialInsurance: true }))}
+                  />
+                  <span>あり</span>
+                </label>
+                <label className="staff-insurance-option">
+                  <input
+                    type="checkbox"
+                    checked={!form.socialInsurance}
+                    onChange={() => setForm((prev) => ({ ...prev, socialInsurance: false }))}
+                  />
+                  <span>なし</span>
+                </label>
+              </span>
+            </div>
+            {!form.socialInsurance ? (
+              <label>
+                契約時間（h）
+                <input
+                  type="number"
+                  min="0"
+                  step="0.5"
+                  value={form.weeklyContractHours}
+                  onChange={(e) => setForm((prev) => ({ ...prev, weeklyContractHours: e.target.value }))}
+                />
+              </label>
+            ) : (
+              <div aria-hidden="true" />
+            )}
+          </div>
           <label>
             契約開始日
             <input
@@ -1311,31 +1701,6 @@ function StaffFormModal({
               onChange={(e) => setForm((prev) => ({ ...prev, contractEndDate: e.target.value }))}
             />
           </label>
-          <div className="staff-form-renew">
-            <button
-              type="button"
-              className="btn ghost-sm contract-renew-btn"
-              title="現行契約の翌月1日から3か月分を自動入力"
-              onClick={() => {
-                const renewed = calcRenewedContractPeriod(
-                  form.contractEndDate,
-                  form.contractStartDate || form.hireDate,
-                  DEFAULT_CONTRACT_RENEWAL_MONTHS
-                );
-                setForm((prev) => ({
-                  ...prev,
-                  contractStartDate: renewed.contractStartDate,
-                  contractEndDate: renewed.contractEndDate,
-                  contractRenewalMonths: String(renewed.contractRenewalMonths),
-                }));
-              }}
-            >
-              3か月更新済
-            </button>
-            <span className="muted" style={{ fontSize: 11 }}>
-              終了月の翌月1日〜3か月を自動入力
-            </span>
-          </div>
           <label>
             更新間隔（か月）
             <input
@@ -1346,29 +1711,55 @@ function StaffFormModal({
               onChange={(e) => setForm((prev) => ({ ...prev, contractRenewalMonths: e.target.value }))}
             />
           </label>
-          <label>
-            時給（円）
-            <input
-              type="number"
-              min="0"
-              step="10"
-              value={form.hourlyWage}
-              onChange={(e) => setForm((prev) => ({ ...prev, hourlyWage: e.target.value }))}
+          {mode === "edit" ? (
+            <div className="staff-form-renew">
+              <button
+                type="button"
+                className="btn ghost-sm contract-renew-btn"
+                title="現行契約の翌月1日から3か月分を自動入力"
+                onClick={() => {
+                  const renewed = calcRenewedContractPeriod(
+                    form.contractEndDate,
+                    form.contractStartDate || form.hireDate,
+                    DEFAULT_CONTRACT_RENEWAL_MONTHS
+                  );
+                  setForm((prev) => ({
+                    ...prev,
+                    contractStartDate: renewed.contractStartDate,
+                    contractEndDate: renewed.contractEndDate,
+                    contractRenewalMonths: String(renewed.contractRenewalMonths),
+                  }));
+                }}
+              >
+                3か月更新
+              </button>
+              <span className="muted" style={{ fontSize: 11 }}>
+                終了月の翌月1日〜3か月を自動入力
+              </span>
+            </div>
+          ) : null}
+          {mode === "create" ? (
+            <label>
+              時給（円）
+              <input
+                type="number"
+                min="0"
+                step="10"
+                value={form.hourlyWage}
+                onChange={(e) => setForm((prev) => ({ ...prev, hourlyWage: e.target.value }))}
+              />
+            </label>
+          ) : null}
+          <label className="staff-form-span">
+            備考
+            <textarea
+              value={form.note}
+              onChange={(e) => setForm((prev) => ({ ...prev, note: e.target.value }))}
+              placeholder="連絡事項・注意点など（任意）"
+              rows={3}
             />
-          </label>
-          <label className="master-checkbox" style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={form.displayGivenName}
-              onChange={(e) => setForm((prev) => ({ ...prev, displayGivenName: e.target.checked }))}
-            />
-            <span>名を表示</span>
           </label>
         </div>
-        <p className="muted" style={{ margin: 0 }}>
-          契約終了日が空の場合、開始日＋更新間隔（既定3か月）から自動計算します。所属候補:{" "}
-          {departments.filter((d) => d !== "本部").join(" / ") || "なし"}
-        </p>
         {message ? <p className="badge warn">{message}</p> : null}
         <div className="actions" style={{ justifyContent: "flex-end" }}>
           <button type="button" className="btn primary btn-action-green" onClick={() => void onSubmit()}>
@@ -1378,71 +1769,6 @@ function StaffFormModal({
             キャンセル
           </button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-function StaffExtraEdit({
-  staff,
-  onChange,
-}: {
-  staff: Staff | undefined;
-  onChange: (patch: Partial<Staff>) => void;
-}) {
-  if (!staff) return null;
-  return (
-    <div className="staff-extra-edit">
-      <div className="muted" style={{ fontSize: 12, fontWeight: 700 }}>
-        追加項目（{staff.name}
-        {staff.firstName}）
-      </div>
-      <div className="filters dashboard-filters">
-        <label className="filter-field">
-          <span>ログイン用メール</span>
-          <input
-            className="master-input"
-            type="email"
-            value={staff.email}
-            onChange={(e) => onChange({ email: e.target.value })}
-            placeholder="login@example.com"
-          />
-        </label>
-        <label className="filter-field">
-          <span>パスワード</span>
-          <input className="master-input" value={staff.password} onChange={(e) => onChange({ password: e.target.value })} />
-        </label>
-        <label className="filter-field">
-          <span>Googleアドレス</span>
-          <input
-            className="master-input"
-            type="email"
-            value={staff.googleEmail}
-            onChange={(e) => onChange({ googleEmail: e.target.value })}
-            placeholder="name@example.com"
-          />
-        </label>
-        <label className="filter-field">
-          <span>更新間隔（か月）</span>
-          <input
-            className="master-input"
-            type="number"
-            min="1"
-            value={staff.contractRenewalMonths}
-            onChange={(e) => onChange({ contractRenewalMonths: Math.max(1, Number(e.target.value) || 3) })}
-          />
-        </label>
-        <label className="filter-field" style={{ alignSelf: "end" }}>
-          <span>名表示</span>
-          <label className="master-checkbox" style={{ flexDirection: "row", alignItems: "center" }}>
-            <input
-              type="checkbox"
-              checked={staff.displayGivenName}
-              onChange={(e) => onChange({ displayGivenName: e.target.checked })}
-            />
-            <span>名を表示</span>
-          </label>
-        </label>
       </div>
     </div>
   );

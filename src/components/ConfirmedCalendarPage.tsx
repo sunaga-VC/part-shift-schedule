@@ -5,6 +5,7 @@ import { Icons } from "@/components/icons";
 import { useShift } from "@/context/ShiftContext";
 import { formatDateShort } from "@/lib/shift/dates";
 import { getStaffDisplayName } from "@/lib/shift/display";
+import { getShiftStatusLabel, isAttendanceStatus } from "@/lib/shift/status";
 import { formatShiftSummary, formatTimeRange } from "@/lib/shift/time";
 
 export function ConfirmedCalendarPage() {
@@ -45,11 +46,11 @@ export function ConfirmedCalendarPage() {
   const [selectedDate, setSelectedDate] = useState(todayKey);
 
   const visibleConfirmed = useMemo(() => {
-    return state.confirmedShifts.filter((s) => s.status === "confirmed");
+    return state.confirmedShifts.filter((s) => isAttendanceStatus(s.status));
   }, [isAdmin, state.confirmedShifts]);
 
   const myShifts = visibleConfirmed.filter(
-    (s) => s.staffId === currentUser.id && s.date === selectedDate
+    (s) => s.staffId === currentUser?.id && s.date === selectedDate
   );
   const dayShifts = visibleConfirmed
     .filter((s) => s.date === selectedDate)
@@ -84,10 +85,10 @@ export function ConfirmedCalendarPage() {
                 >
                   {group.map((date) => {
                     const mine = visibleConfirmed.find(
-                      (s) => s.staffId === currentUser.id && s.date === date
+                      (s) => s.staffId === currentUser?.id && s.date === date
                     );
                     const countConfirmed = visibleConfirmed.filter(
-                      (s) => s.date === date && s.status === "confirmed"
+                      (s) => s.date === date && isAttendanceStatus(s.status)
                     ).length;
                     const countUnconfirmed = visibleConfirmed.filter(
                       (s) => s.date === date && s.status === "unconfirmed"
@@ -134,7 +135,7 @@ export function ConfirmedCalendarPage() {
                       <Icons.Note size={14} />
                     </span>
                   ) : null}
-                  <span>{s.status === "confirmed" ? "確定済み" : "未確定"}</span>
+                  <span>{isAttendanceStatus(s.status) ? getShiftStatusLabel(s.status) : "未確定"}</span>
                 </div>
               ))
             )}
@@ -152,7 +153,7 @@ export function ConfirmedCalendarPage() {
                       <strong>{getStaffDisplayName(staff)}さん</strong>
                       <span>{formatTimeRange(s.startTime, s.endTime)}</span>
                       <span>{formatShiftSummary(s.startTime, s.endTime, s.breakMinutes)}</span>
-                      <span>{s.status === "confirmed" ? "確定済み" : "未確定"}</span>
+                      <span>{isAttendanceStatus(s.status) ? getShiftStatusLabel(s.status) : "未確定"}</span>
                     </div>
                   );
                 })}
