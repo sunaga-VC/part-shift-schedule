@@ -9,6 +9,8 @@ export type EmploymentStatus = "active" | "inactive";
 export type ShiftPeriodStatus = "draft" | "editing" | "adjusting" | "published";
 export type ConfirmedShiftStatus = "adjusting" | "unconfirmed" | "confirmed" | "remote";
 export type MessageAudience = "all" | "team";
+export type GoalMemoFrequency = "daily" | "weekdays" | "monthly";
+export type GoalMemoMonthlyMode = "single" | "range";
 
 export type Database = {
   public: {
@@ -392,6 +394,65 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "required_shifts_period_id_fkey";
+            columns: ["period_id"];
+            isOneToOne: false;
+            referencedRelation: "shift_periods";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      goal_memos: {
+        Row: {
+          id: string;
+          period_id: string;
+          body: string;
+          start_date: string;
+          end_date: string;
+          frequency: GoalMemoFrequency;
+          weekdays: number[];
+          repeat_months: number;
+          monthly_mode: GoalMemoMonthlyMode;
+          month_day: number;
+          month_day_start: number;
+          month_day_end: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          period_id: string;
+          body: string;
+          start_date: string;
+          end_date: string;
+          frequency?: GoalMemoFrequency;
+          weekdays?: number[];
+          repeat_months?: number;
+          monthly_mode?: GoalMemoMonthlyMode;
+          month_day?: number;
+          month_day_start?: number;
+          month_day_end?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          period_id?: string;
+          body?: string;
+          start_date?: string;
+          end_date?: string;
+          frequency?: GoalMemoFrequency;
+          weekdays?: number[];
+          repeat_months?: number;
+          monthly_mode?: GoalMemoMonthlyMode;
+          month_day?: number;
+          month_day_start?: number;
+          month_day_end?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "goal_memos_period_id_fkey";
             columns: ["period_id"];
             isOneToOne: false;
             referencedRelation: "shift_periods";

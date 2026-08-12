@@ -131,6 +131,15 @@ export function AdminBoard() {
     const matchIndex = weekGroups.findIndex((group) => group.includes(selectedDate));
     setSelectedWeekIndex(matchIndex >= 0 ? matchIndex : 0);
   }, [selectedDate, weekGroups]);
+  useEffect(() => {
+    if (selectedWorkerId && state.staffList.some((staff) => staff.id === selectedWorkerId)) {
+      return;
+    }
+    const firstWorker = state.staffList.find((staff) => staff.role === "worker");
+    if (firstWorker) {
+      setSelectedWorkerId(firstWorker.id);
+    }
+  }, [selectedWorkerId, state.staffList]);
 
   const confirmed = state.confirmedShifts
     .filter((s) => s.date === selectedDate)

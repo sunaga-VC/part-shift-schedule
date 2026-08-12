@@ -29,6 +29,12 @@ import { DEFAULT_CONTRACT_RENEWAL_MONTHS } from "@/lib/shift/staffEmployment";
 import { calcActualMinutes, calcBreakMinutes, isValidTimeRange } from "@/lib/shift/time";
 import { createClient } from "@/lib/supabase/client";
 import {
+  loadShiftSnapshotFromSupabase,
+  persistShiftSnapshotToSupabase,
+  persistWorkerDesiredShiftsToSupabase,
+  type ShiftPersistenceSnapshot,
+} from "@/lib/supabase/shiftPersistence";
+import {
   fetchStaffBootstrap,
   persistSalaryRaise,
   persistSalaryRaiseUpdate,
@@ -319,6 +325,33 @@ async function detectSupabaseSession(): Promise<boolean> {
   }
 }
 
+function buildShiftPersistenceSnapshot(state: AppState): ShiftPersistenceSnapshot {
+  return {
+    period: state.period,
+    desiredShifts: state.desiredShifts,
+    confirmedShifts: state.confirmedShifts,
+    requiredShifts: state.requiredShifts,
+    goalBlocksByDate: state.goalBlocksByDate,
+    goalMemos: state.goalMemos,
+  };
+}
+
+function buildShiftPersistenceSignature(snapshot: ShiftPersistenceSnapshot): string {
+  const goalBlocksByDate = Object.fromEntries(
+    Object.entries(snapshot.goalBlocksByDate)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, blocks]) => [date, normalizeGoalBlocks(blocks)])
+  );
+  return JSON.stringify({
+    period: snapshot.period,
+    desiredShifts: [...snapshot.desiredShifts].sort((a, b) => a.id.localeCompare(b.id)),
+    confirmedShifts: [...snapshot.confirmedShifts].sort((a, b) => a.id.localeCompare(b.id)),
+    requiredShifts: [...snapshot.requiredShifts].sort((a, b) => a.date.localeCompare(b.date)),
+    goalBlocksByDate,
+    goalMemos: [...snapshot.goalMemos].sort((a, b) => a.id.localeCompare(b.id)),
+  });
+}
+
 export function ShiftProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AppState>(createInitialState);
   const [ready, setReady] = useState(false);
@@ -326,6 +359,9 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   const usingSupabaseAuthRef = useRef(false);
   const staffPersistTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const staffPersistPatches = useRef<Record<string, StaffPersistPatch>>({});
+  const latestShiftSnapshotRef = useRef<ShiftPersistenceSnapshot>(buildShiftPersistenceSnapshot(createInitialState()));
+  const lastShiftPersistSignatureRef = useRef("");
+  const currentUserForSync = state.staffList.find((staff) => staff.id === state.currentUserId);
 
   const flushStaffPersists = useCallback(async () => {
     const entries = Object.entries(staffPersistPatches.current);
@@ -356,6 +392,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
     async function applyAuthUser(userId: string | null) {
       const local = loadState();
+      const localShiftSnapshot = buildShiftPersistenceSnapshot(local);
 
       if (!userId) {
         usingSupabaseAuthRef.current = false;
@@ -385,9 +422,13 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
 
         const staffList = bootstrap?.staffList ?? [];
+        const remoteShiftSnapshot = await loadShiftSnapshotFromSupabase(supabase, localShiftSnapshot);
+        if (cancelled) return;
+        lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remoteShiftSnapshot);
 
         setState({
           ...local,
+          ...remoteShiftSnapshot,
           staffList,
           departments: bootstrap?.departments ?? [],
           // Auth の user id を必ず正とする（前ユーザーの currentUserId を引きずらない）
@@ -460,26 +501,91 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   }, [state, ready, usingSupabaseAuth]);
 
   useEffect(() => {
+    latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(state);
+  }, [state]);
+
+  useEffect(() => {
+    if (!ready || !usingSupabaseAuth) return;
+    if (!currentUserForSync) return;
+    const snapshot = latestShiftSnapshotRef.current;
+    const signature = buildShiftPersistenceSignature(snapshot);
+    if (lastShiftPersistSignatureRef.current === signature) return;
+    lastShiftPersistSignatureRef.current = signature;
+
+    void (async () => {
+      try {
+        const supabase = createClient();
+        if (currentUserForSync.role === "worker") {
+          await persistWorkerDesiredShiftsToSupabase(supabase, snapshot, currentUserForSync.id);
+          return;
+        }
+        await persistShiftSnapshotToSupabase(supabase, snapshot);
+      } catch (error) {
+        console.warn("Shift snapshot persist skipped", error);
+      }
+    })();
+  }, [ready, state, usingSupabaseAuth, currentUserForSync]);
+
+  useEffect(() => {
     const onStorage = (event: StorageEvent) => {
       if (event.key !== STORAGE_KEY) return;
+      if (usingSupabaseAuthRef.current) return;
       const next = loadState();
-      setState((prev) => {
-        if (usingSupabaseAuthRef.current) {
-          return {
-            ...prev,
-            ...next,
-            staffList: prev.staffList,
-            departments: prev.departments,
-            currentUserId: prev.currentUserId,
-          };
-        }
-        return next;
-      });
+      setState(next);
     };
 
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, []);
+
+  useEffect(() => {
+    if (!ready || !usingSupabaseAuth) return;
+    let cancelled = false;
+    let supabase: ReturnType<typeof createClient> | null = null;
+    let channel: any = null;
+
+    const reloadShiftSnapshot = async () => {
+      if (!supabase || cancelled) return;
+      try {
+        const next = await loadShiftSnapshotFromSupabase(supabase, latestShiftSnapshotRef.current);
+        if (cancelled) return;
+        lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(next);
+        setState((prev) => ({
+          ...prev,
+          ...next,
+          staffList: prev.staffList,
+          departments: prev.departments,
+          currentUserId: prev.currentUserId,
+        }));
+      } catch (error) {
+        console.warn("Shift snapshot reload skipped", error);
+      }
+    };
+
+    void (async () => {
+      try {
+        supabase = createClient();
+        channel = supabase
+          .channel("shift-state-sync")
+          .on("postgres_changes", { event: "*", schema: "public", table: "desired_shifts" }, reloadShiftSnapshot)
+          .on("postgres_changes", { event: "*", schema: "public", table: "confirmed_shifts" }, reloadShiftSnapshot)
+          .on("postgres_changes", { event: "*", schema: "public", table: "required_shifts" }, reloadShiftSnapshot)
+          .on("postgres_changes", { event: "*", schema: "public", table: "goal_block_slots" }, reloadShiftSnapshot)
+          .on("postgres_changes", { event: "*", schema: "public", table: "goal_memos" }, reloadShiftSnapshot)
+          .on("postgres_changes", { event: "*", schema: "public", table: "shift_periods" }, reloadShiftSnapshot);
+        channel.subscribe();
+      } catch (error) {
+        console.warn("Shift realtime subscription skipped", error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (supabase && channel) {
+        void supabase.removeChannel(channel);
+      }
+    };
+  }, [ready, usingSupabaseAuth]);
 
   useEffect(() => {
     const onHide = () => {

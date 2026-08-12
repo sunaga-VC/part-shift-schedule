@@ -22,6 +22,7 @@ grant select, insert, update, delete on table public.shift_periods to authentica
 grant select, insert, update, delete on table public.desired_shifts to authenticated, service_role;
 grant select, insert, update, delete on table public.confirmed_shifts to authenticated, service_role;
 grant select, insert, update, delete on table public.goal_block_slots to authenticated, service_role;
+grant select, insert, update, delete on table public.goal_memos to authenticated, service_role;
 grant select, insert, update, delete on table public.required_shifts to authenticated, service_role;
 
 alter default privileges in schema public
