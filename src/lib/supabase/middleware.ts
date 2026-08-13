@@ -83,9 +83,6 @@ export async function updateSession(request: NextRequest) {
   if (pathname.startsWith("/api/dev/")) {
     return supabaseResponse;
   }
-  if (pathname.startsWith("/api/bootstrap/")) {
-    return supabaseResponse;
-  }
   if (pathname.startsWith("/api/health/")) {
     return supabaseResponse;
   }
