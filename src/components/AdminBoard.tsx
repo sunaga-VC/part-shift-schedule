@@ -788,11 +788,7 @@ export function AdminBoard() {
                               >
                                 <div className="day-status-row-icons">
                                   {entries.map(({ staff, currentStatus, shift, pendingResubmission }) => {
-                                    const iconStatus =
-                                      currentStatus === "adjusting" || pendingResubmission
-                                        ? "adjusting"
-                                        : currentStatus;
-                                    const statusColor = getShiftStatusRingColor(iconStatus);
+                                    const statusColor = getShiftStatusRingColor(currentStatus);
                                     const startPct = shift
                                       ? Math.max(
                                           0,
@@ -807,16 +803,19 @@ export function AdminBoard() {
                                       : 0;
                                     const spanPct = Math.max(0, endPct - startPct);
                                     const iconChar = getStaffDisplayInitial(staff);
-                                    const isRemote = iconStatus === "remote";
+                                    const isRemote = currentStatus === "remote";
                                     const progressDasharray = isRemote
                                       ? buildRemoteRingDashArray(spanPct)
                                       : `${spanPct} ${1 - spanPct}`;
                                     return (
                                       <span
                                         key={staff.id}
-                                        className={`day-status-icon ${iconStatus}${pendingResubmission ? " resubmission-pending" : ""}`}
-                                        title={`${getStaffDisplayName(staff)}さん${isRemote ? "（在宅）" : ""}`}
+                                        className={`day-status-icon-cell${pendingResubmission ? " pending" : ""}`}
                                       >
+                                        <span
+                                          className={`day-status-icon ${currentStatus}`}
+                                          title={`${getStaffDisplayName(staff)}さん${isRemote ? "（在宅）" : ""}`}
+                                        >
                                         <svg className="day-status-ring" viewBox="0 0 20 20" aria-hidden="true">
                                           <circle cx="10" cy="10" r="7.5" fill="none" stroke="#e5e7eb" strokeWidth="2" />
                                           {shift && spanPct > 0 ? (
@@ -838,6 +837,7 @@ export function AdminBoard() {
                                         </svg>
                                         <span className="day-status-initial">{iconChar}</span>
                                       </span>
+                                    </span>
                                     );
                                   })}
                                 </div>
