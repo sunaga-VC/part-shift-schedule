@@ -196,12 +196,12 @@ export async function updateSession(request: NextRequest) {
   const isAdminRoute = pathname.startsWith("/admin");
   const isMasterRoute = pathname.startsWith("/admin/master");
 
-  // スタッフ（worker）は管理者画面に入れない
-  if (!isAdmin && isAdminRoute) {
+  // スタッフ（worker）はホーム・管理者画面に入れない（シフト画面へ）
+  if (!isAdmin && (pathname === "/" || isAdminRoute)) {
     if (isApiRoute(pathname)) {
       return apiJsonError(403, "管理者権限が必要です。");
     }
-    return redirectTo(request, "/");
+    return redirectTo(request, "/shift");
   }
 
   // 一般管理者はマスタ管理に入れない（アルバイト管理者は可）

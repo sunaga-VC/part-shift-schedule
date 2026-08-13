@@ -93,7 +93,7 @@ export function AdminHomeMessages() {
       {editing ? (
         <>
           <span className="muted" style={{ fontSize: 12 }}>
-            送信するとアルバイトのホームに表示されます
+            送信するとアルバイトのシフト画面に表示されます
           </span>
 
           <label className="filter-field home-message-body-field">

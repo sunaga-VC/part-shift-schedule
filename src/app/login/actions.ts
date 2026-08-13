@@ -22,9 +22,9 @@ function resolveDestination(input: {
     if (next.startsWith("/admin")) return next;
     return "/";
   }
-  if (next.startsWith("/admin")) return "/";
+  if (next.startsWith("/admin") || next === "/") return "/shift";
   if (next.startsWith("/")) return next;
-  return "/";
+  return "/shift";
 }
 
 export async function loginAction(

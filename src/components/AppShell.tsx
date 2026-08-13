@@ -8,10 +8,7 @@ import { useShift } from "@/components/context/ShiftContext";
 import { createClient } from "@/lib/supabase/client";
 import { getStaffDisplayName } from "@/lib/shift/display";
 
-const workerLinks = [
-  { href: "/", label: "ホーム", Icon: Icons.Home },
-  { href: "/shift", label: "シフト", Icon: Icons.Shift },
-];
+const workerLinks = [{ href: "/shift", label: "シフト", Icon: Icons.Shift }];
 
 const adminBaseLinks = [
   { href: "/", label: "ホーム", Icon: Icons.Home },
@@ -34,8 +31,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // クライアント側でも権限外URLを遮断（ブックマーク直打ち対策）
   useEffect(() => {
     if (!ready || !currentUser) return;
-    if (!isAdmin && pathname.startsWith("/admin")) {
-      window.location.replace("/");
+    if (!isAdmin && (pathname.startsWith("/admin") || pathname === "/")) {
+      window.location.replace("/shift");
       return;
     }
     if (isAdmin && !canManageMaster && pathname.startsWith("/admin/master")) {
@@ -184,21 +181,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       <main className="app-main">{children}</main>
 
-      <nav className="mobile-bottom-nav" aria-label="メインメニュー">
-        {links.map((link) => {
-          const active =
-            link.href === "/"
-              ? pathname === "/"
-              : pathname === link.href || pathname.startsWith(`${link.href}/`);
-          const Icon = link.Icon;
-          return (
-            <Link key={link.href} href={link.href} className={active ? "active" : undefined}>
-              <Icon size={20} className="nav-icon" />
-              <span>{link.label}</span>
-            </Link>
-          );
-        })}
-      </nav>
+      {links.length > 1 ? (
+        <nav className="mobile-bottom-nav" aria-label="メインメニュー">
+          {links.map((link) => {
+            const active =
+              link.href === "/"
+                ? pathname === "/"
+                : pathname === link.href || pathname.startsWith(`${link.href}/`);
+            const Icon = link.Icon;
+            return (
+              <Link key={link.href} href={link.href} className={active ? "active" : undefined}>
+                <Icon size={20} className="nav-icon" />
+                <span>{link.label}</span>
+              </Link>
+            );
+          })}
+        </nav>
+      ) : null}
     </div>
   );
 }

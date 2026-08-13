@@ -2,6 +2,7 @@
 
 import { useMemo, useState, useEffect } from "react";
 import { CalendarNavToolbar } from "@/components/CalendarNavToolbar";
+import { WorkerShiftHeader } from "@/components/WorkerShiftHeader";
 import { Icons } from "@/components/icons";
 import { useShift } from "@/components/context/ShiftContext";
 import { useWorkCalendarNavigation } from "@/hooks/useWorkCalendarNavigation";
@@ -380,6 +381,7 @@ export function WishCalendarPage() {
 
   return (
     <div className="stack">
+      {isWorkerView ? <WorkerShiftHeader /> : null}
       <section className="panel">
         <h1 className="page-title-with-icon" style={{ marginTop: 0 }}>
           <Icons.Shift size={20} className="page-title-icon" />
