@@ -383,7 +383,7 @@ export function AdminBoard() {
               (shift) => shift.date === date && shift.staffId === staff.id
             );
             const currentStatus = resolveShiftStatus(confirmedShift, desiredShift, date);
-            return isResubmissionPending(confirmedShift, desiredShift, date)
+            return currentStatus === "adjusting"
               ? [{ date, name: getStaffDisplayName(staff) }]
               : [];
           })
@@ -467,7 +467,7 @@ export function AdminBoard() {
                 }
                 return {
                   value: formatMinutes(cellShift.actualMinutes).replace(/h$/, ""),
-                  isAdjusting: isResubmissionPending(confirmedShift, desiredShift, date),
+                  isAdjusting: currentStatus === "adjusting",
                 };
               });
               return (
@@ -780,16 +780,19 @@ export function AdminBoard() {
                               state.confirmedShifts,
                               { knownDepartments }
                             );
-                            const hasPendingAdjustment = entries.some(({ pendingResubmission }) => pendingResubmission);
                             return (
                               <div
                                 key={department}
-                                className={`day-status-row department-row${isPublished ? " published" : ""}${hasPendingAdjustment ? " pending" : ""}`}
+                                className={`day-status-row department-row${isPublished ? " published" : ""}`}
                                 style={{ borderBottom: index < departmentRows.length - 1 ? "1px solid var(--line)" : undefined }}
                               >
                                 <div className="day-status-row-icons">
-                                  {entries.map(({ staff, currentStatus, shift }) => {
-                                    const statusColor = getShiftStatusRingColor(currentStatus);
+                                  {entries.map(({ staff, currentStatus, shift, pendingResubmission }) => {
+                                    const iconStatus =
+                                      currentStatus === "adjusting" || pendingResubmission
+                                        ? "adjusting"
+                                        : currentStatus;
+                                    const statusColor = getShiftStatusRingColor(iconStatus);
                                     const startPct = shift
                                       ? Math.max(
                                           0,
@@ -804,14 +807,14 @@ export function AdminBoard() {
                                       : 0;
                                     const spanPct = Math.max(0, endPct - startPct);
                                     const iconChar = getStaffDisplayInitial(staff);
-                                    const isRemote = currentStatus === "remote";
+                                    const isRemote = iconStatus === "remote";
                                     const progressDasharray = isRemote
                                       ? buildRemoteRingDashArray(spanPct)
                                       : `${spanPct} ${1 - spanPct}`;
                                     return (
                                       <span
                                         key={staff.id}
-                                        className={`day-status-icon ${currentStatus}`}
+                                        className={`day-status-icon ${iconStatus}${pendingResubmission ? " resubmission-pending" : ""}`}
                                         title={`${getStaffDisplayName(staff)}さん${isRemote ? "（在宅）" : ""}`}
                                       >
                                         <svg className="day-status-ring" viewBox="0 0 20 20" aria-hidden="true">

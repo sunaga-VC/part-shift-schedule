@@ -223,8 +223,10 @@ export function resolveWorkerShiftDisplay(
     return { kind: "empty", pending: true };
   }
 
-  if (published && confirmed && !pending) {
-    if (isRestConfirmedShift(confirmed)) return { kind: "rest", pending: false };
+  if (published && !pending) {
+    if (!confirmed || isRestConfirmedShift(confirmed)) {
+      return { kind: "rest", pending: false };
+    }
     return { kind: "confirmed", shift: confirmed, pending: false };
   }
 
@@ -234,17 +236,23 @@ export function resolveWorkerShiftDisplay(
 
 /**
  * 管理者画面のステータス表示・編集用。
- * - 希望のみ（初回提出）→ 調整
- * - 管理者が確定 / 公開後の希望変更 → 調整または確定ステータス
- * セル色（pending）は hasStaffPendingAdjustment で別判定
+ * - 希望あり → 週確定（publishedAt）前後を問わず「調整」（確定ボタンで反映されるまで）
+ * - 公開後に希望が確定内容と異なる → 調整
+ * - 希望なし・休み確定 → 休み
  */
 export function getAdminShiftStatus(
   confirmed: ConfirmedShift | undefined,
   desired: DesiredShift | undefined
 ): ConfirmedShift["status"] {
   if (!confirmed && !desired) return "unconfirmed";
-  if (!confirmed) return "adjusting";
-  if (hasWishChangedAfterPublish(confirmed, desired)) return "adjusting";
+
+  if (desired) {
+    if (!confirmed?.publishedAt) return "adjusting";
+    if (hasWishChangedAfterPublish(confirmed, desired)) return "adjusting";
+  }
+
+  if (!confirmed) return "unconfirmed";
+  if (isRestConfirmedShift(confirmed)) return "unconfirmed";
   return confirmed.status;
 }
 
@@ -272,20 +280,10 @@ export function resolveAdminShiftDisplay(
   desired: DesiredShift | undefined,
   options?: { currentStatus?: ConfirmedShift["status"] }
 ): ConfirmedShift | DesiredShift | undefined {
-  if (!confirmed && !desired) return undefined;
-
   const status = options?.currentStatus ?? getAdminShiftStatus(confirmed, desired);
-  // 休み（希望未設定・未確定）は棒グラフ等の時間表示対象外
   if (status === "unconfirmed") return undefined;
-
-  if (!confirmed) return desired;
-  if (!desired) {
-    if (isRestConfirmedShift(confirmed)) return undefined;
-    return confirmed;
-  }
   if (status === "adjusting") return desired;
-  if (!confirmed.publishedAt) return desired;
-  if (hasWishChangedAfterPublish(confirmed, desired)) return desired;
+  if (!confirmed || isRestConfirmedShift(confirmed)) return undefined;
   return confirmed;
 }
 

@@ -1365,6 +1365,10 @@ textarea {
   color: #b45309;
 }
 
+.day-status-icon.resubmission-pending {
+  box-shadow: inset 0 0 0 2px #f59e0b;
+}
+
 .day-status-icon.unconfirmed {
   background: var(--status-unconfirmed-soft);
   color: var(--muted);

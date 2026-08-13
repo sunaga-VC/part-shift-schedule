@@ -9,7 +9,6 @@ import { formatDateLong, formatDateShort } from "@/lib/shift/dates";
 import { getStaffDisplayName } from "@/lib/shift/display";
 import {
   hasStaffPendingAdjustment,
-  isRestConfirmedShift,
   isWorkerCalendarDatePublished,
   resolveWorkerShiftDisplay,
 } from "@/lib/shift/publish-state";
@@ -67,9 +66,13 @@ export function WishCalendarPage() {
     });
   }, [isWorkerView, workerPublishedDates]);
 
+  const effectiveWorkerPublishedDates = useMemo(() => {
+    if (!isWorkerView) return workerPublishedDates ?? [];
+    return Array.from(new Set([...(workerPublishedDates ?? []), ...stickyPublishedDates])).sort();
+  }, [isWorkerView, workerPublishedDates, stickyPublishedDates]);
+
   function isWorkerPublishedDate(date: string) {
-    if (stickyPublishedDates.includes(date)) return true;
-    if (workerPublishedDates?.includes(date)) return true;
+    if (effectiveWorkerPublishedDates.includes(date)) return true;
     return isWorkerCalendarDatePublished(
       date,
       workerPublishedDates,
@@ -110,18 +113,12 @@ export function WishCalendarPage() {
     confirmedShift: typeof selectedDateConfirmedShift,
     mine: typeof myWish
   ) {
-    if (isWorkerView && isWorkerPublishedDate(date) && confirmedShift) {
-      if (isRestConfirmedShift(confirmedShift)) {
-        return { kind: "rest" as const, pending: false };
-      }
-      return { kind: "confirmed" as const, shift: confirmedShift, pending: false };
-    }
     return resolveWorkerShiftDisplay(
       state.period,
       confirmedShift,
       mine,
       date,
-      workerPublishedDates
+      isWorkerView ? effectiveWorkerPublishedDates : workerPublishedDates
     );
   }
 
