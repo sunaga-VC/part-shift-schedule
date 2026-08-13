@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { CalendarNavToolbar } from "@/components/CalendarNavToolbar";
 import { Icons } from "@/components/icons";
 import { useShift } from "@/components/context/ShiftContext";
@@ -52,7 +52,35 @@ export function WishCalendarPage() {
 
   const isWorkerView = !isAdmin && currentUser?.role === "worker";
   const workerPublishedDates = state.workerPublishedDates;
+  const [stickyPublishedDates, setStickyPublishedDates] = useState<string[]>([]);
   const knownDepartments = useMemo(() => new Set(state.departments), [state.departments]);
+
+  useEffect(() => {
+    if (!isWorkerView || !workerPublishedDates?.length) return;
+    setStickyPublishedDates((prev) => {
+      const merged = new Set([...prev, ...workerPublishedDates]);
+      const next = Array.from(merged).sort();
+      if (next.length === prev.length && next.every((date, index) => date === prev[index])) {
+        return prev;
+      }
+      return next;
+    });
+  }, [isWorkerView, workerPublishedDates]);
+
+  function isWorkerPublishedDate(date: string) {
+    if (stickyPublishedDates.includes(date)) return true;
+    if (workerPublishedDates?.includes(date)) return true;
+    return isWorkerCalendarDatePublished(
+      date,
+      workerPublishedDates,
+      state.period,
+      state.staffList,
+      state.confirmedShifts,
+      currentUser?.team ?? "",
+      currentUser?.id ?? "",
+      { knownDepartments }
+    );
+  }
 
   const myWish = state.desiredShifts.find(
     (s) => s.staffId === currentUser?.id && s.date === selectedDate
@@ -62,6 +90,9 @@ export function WishCalendarPage() {
   );
 
   function isPublishedCalendarDate(date: string) {
+    if (isWorkerView) {
+      return isWorkerPublishedDate(date);
+    }
     return isWorkerCalendarDatePublished(
       date,
       workerPublishedDates,
@@ -79,7 +110,7 @@ export function WishCalendarPage() {
     confirmedShift: typeof selectedDateConfirmedShift,
     mine: typeof myWish
   ) {
-    if (isWorkerView && isPublishedCalendarDate(date) && confirmedShift) {
+    if (isWorkerView && isWorkerPublishedDate(date) && confirmedShift) {
       if (isRestConfirmedShift(confirmedShift)) {
         return { kind: "rest" as const, pending: false };
       }

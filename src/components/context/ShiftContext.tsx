@@ -289,7 +289,7 @@ function buildShiftPersistenceSignature(snapshot: ShiftPersistenceSnapshot): str
 }
 
 async function fetchShiftSnapshotFromApi(): Promise<ShiftPersistenceSnapshot | null> {
-  const response = await fetch("/api/shifts");
+  const response = await fetch("/api/shifts", { credentials: "same-origin" });
   if (!response.ok) {
     console.warn("GET /api/shifts failed", response.status);
     return null;
@@ -303,7 +303,7 @@ async function fetchShiftSnapshotFromApi(): Promise<ShiftPersistenceSnapshot | n
 }
 
 async function fetchHomeMessagesFromApi(): Promise<HomeMessage[]> {
-  const response = await fetch("/api/messages");
+  const response = await fetch("/api/messages", { credentials: "same-origin" });
   if (!response.ok) return [];
   const payload = (await response.json()) as { ok?: boolean; messages?: HomeMessage[] };
   return payload.ok && Array.isArray(payload.messages) ? payload.messages : [];
@@ -372,7 +372,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const staffPersistTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const staffPersistPatches = useRef<Record<string, StaffPersistPatch>>({});
-  const loadedAuthUserIdRef = useRef<string | null>(null);
+  const authLoadInFlightRef = useRef<Promise<void> | null>(null);
   const latestShiftSnapshotRef = useRef<ShiftPersistenceSnapshot>(buildShiftPersistenceSnapshot(createEmptyAppState()));
   const lastShiftPersistSignatureRef = useRef("");
   const shiftPersistInFlightRef = useRef(0);
@@ -582,9 +582,8 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     let authSubscription: { unsubscribe: () => void } | null = null;
 
-    async function applyAuthUser(userId: string | null, force = false) {
+    async function applyAuthUser(userId: string | null) {
       if (!userId) {
-        loadedAuthUserIdRef.current = null;
         if (!cancelled) {
           setState(createEmptyAppState());
           setReady(true);
@@ -592,15 +591,11 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      if (!force && loadedAuthUserIdRef.current === userId) {
-        if (!cancelled) {
-          setReady(true);
-        }
-        return;
+      if (authLoadInFlightRef.current) {
+        await authLoadInFlightRef.current;
       }
 
-      try {
-        const supabase = createClient();
+      const loadPromise = (async () => {
         if (!cancelled) {
           setReady(false);
         }
@@ -608,7 +603,6 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         const remote = await reloadRemoteAppData();
         if (cancelled) return;
 
-        loadedAuthUserIdRef.current = userId;
         lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remote.shiftSnapshot);
 
         setState({
@@ -618,6 +612,11 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           homeMessages: remote.homeMessages,
           ...remote.shiftSnapshot,
         });
+      })();
+
+      authLoadInFlightRef.current = loadPromise;
+      try {
+        await loadPromise;
       } catch (error) {
         console.warn("Supabase staff bootstrap skipped", error);
         if (!cancelled) {
@@ -630,6 +629,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           });
         }
       } finally {
+        authLoadInFlightRef.current = null;
         if (!cancelled) setReady(true);
       }
     }
@@ -637,22 +637,16 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     async function boot() {
       try {
         const supabase = createClient();
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        await applyAuthUser(user?.id ?? null);
-
         const { data } = supabase.auth.onAuthStateChange((event, session) => {
-          if (event === "INITIAL_SESSION") return;
+          if (event === "INITIAL_SESSION") {
+            void applyAuthUser(session?.user?.id ?? null);
+            return;
+          }
           if (event === "SIGNED_OUT") {
             void applyAuthUser(null);
             return;
           }
-          if (event === "USER_UPDATED") {
-            void applyAuthUser(session?.user?.id ?? null, true);
-            return;
-          }
-          if (event === "SIGNED_IN") {
+          if (event === "SIGNED_IN" || event === "USER_UPDATED") {
             void applyAuthUser(session?.user?.id ?? null);
           }
         });
@@ -747,14 +741,25 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         ]);
         if (!next || cancelled) return;
         lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(next);
-        setState((prev) => ({
-          ...prev,
-          ...next,
-          homeMessages,
-          staffList: prev.staffList,
-          departments: prev.departments,
-          currentUserId: prev.currentUserId,
-        }));
+        setState((prev) => {
+          const isWorker =
+            prev.staffList.find((staff) => staff.id === prev.currentUserId)?.role === "worker";
+          const mergedPublishedDates =
+            isWorker && (prev.workerPublishedDates?.length || next.workerPublishedDates?.length)
+              ? Array.from(
+                  new Set([...(prev.workerPublishedDates ?? []), ...(next.workerPublishedDates ?? [])])
+                ).sort()
+              : next.workerPublishedDates;
+          return {
+            ...prev,
+            ...next,
+            workerPublishedDates: mergedPublishedDates,
+            homeMessages,
+            staffList: prev.staffList,
+            departments: prev.departments,
+            currentUserId: prev.currentUserId,
+          };
+        });
       } catch (error) {
         console.warn("Shift snapshot reload skipped", error);
       }
