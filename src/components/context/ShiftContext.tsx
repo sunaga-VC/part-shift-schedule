@@ -315,8 +315,8 @@ async function reloadRemoteAppData(): Promise<{
   homeMessages: HomeMessage[];
 }> {
   const supabase = createClient();
-  const [bootstrap, shiftSnapshot, homeMessages] = await Promise.all([
-    fetchStaffBootstrap(supabase),
+  const bootstrap = await fetchStaffBootstrap(supabase, { attempts: 4 });
+  const [shiftSnapshot, homeMessages] = await Promise.all([
     fetchShiftSnapshotFromApi(),
     fetchHomeMessagesFromApi(),
   ]);
@@ -372,7 +372,6 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const staffPersistTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const staffPersistPatches = useRef<Record<string, StaffPersistPatch>>({});
-  const authLoadInFlightRef = useRef<Promise<void> | null>(null);
   const latestShiftSnapshotRef = useRef<ShiftPersistenceSnapshot>(buildShiftPersistenceSnapshot(createEmptyAppState()));
   const lastShiftPersistSignatureRef = useRef("");
   const shiftPersistInFlightRef = useRef(0);
@@ -581,8 +580,12 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     let authSubscription: { unsubscribe: () => void } | null = null;
+    let initialSessionHandled = false;
+    let loadGeneration = 0;
 
     async function applyAuthUser(userId: string | null) {
+      const generation = ++loadGeneration;
+
       if (!userId) {
         if (!cancelled) {
           setState(createEmptyAppState());
@@ -591,45 +594,38 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      if (authLoadInFlightRef.current) {
-        await authLoadInFlightRef.current;
-      }
-
-      const loadPromise = (async () => {
+      try {
         if (!cancelled) {
           setReady(false);
         }
 
         const remote = await reloadRemoteAppData();
-        if (cancelled) return;
+        if (cancelled || generation !== loadGeneration) return;
+
+        if (!remote.bootstrap?.userId) {
+          console.warn("staff bootstrap unavailable after login");
+          if (!cancelled) {
+            setState(createEmptyAppState());
+            setReady(true);
+          }
+          return;
+        }
 
         lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remote.shiftSnapshot);
 
         setState({
-          staffList: remote.bootstrap?.staffList ?? [],
-          departments: remote.bootstrap?.departments ?? [],
-          currentUserId: remote.bootstrap?.userId ?? "",
+          staffList: remote.bootstrap.staffList,
+          departments: remote.bootstrap.departments,
+          currentUserId: remote.bootstrap.userId,
           homeMessages: remote.homeMessages,
           ...remote.shiftSnapshot,
         });
-      })();
-
-      authLoadInFlightRef.current = loadPromise;
-      try {
-        await loadPromise;
       } catch (error) {
         console.warn("Supabase staff bootstrap skipped", error);
         if (!cancelled) {
-          setState({
-            staffList: [],
-            departments: [],
-            currentUserId: "",
-            homeMessages: [],
-            ...createEmptyShiftPersistenceFallback(),
-          });
+          setState(createEmptyAppState());
         }
       } finally {
-        authLoadInFlightRef.current = null;
         if (!cancelled) setReady(true);
       }
     }
@@ -639,6 +635,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         const supabase = createClient();
         const { data } = supabase.auth.onAuthStateChange((event, session) => {
           if (event === "INITIAL_SESSION") {
+            initialSessionHandled = true;
             void applyAuthUser(session?.user?.id ?? null);
             return;
           }
@@ -651,6 +648,14 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           }
         });
         authSubscription = data.subscription;
+
+        window.setTimeout(() => {
+          if (cancelled || initialSessionHandled) return;
+          void supabase.auth.getSession().then(({ data: sessionData }) => {
+            if (cancelled || initialSessionHandled) return;
+            void applyAuthUser(sessionData.session?.user?.id ?? null);
+          });
+        }, 150);
       } catch (error) {
         console.warn("Supabase auth boot failed", error);
         if (!cancelled) {

@@ -67,10 +67,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     window.location.href = "/login";
   };
 
-  if (!ready || !currentUser) {
+  if (!ready) {
     return (
       <div className="app-shell">
         <div className="panel">読み込み中...</div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <div className="app-shell">
+        <div className="panel stack">
+          <p>プロフィールの読み込みに失敗しました。ページを再読み込みするか、再度ログインしてください。</p>
+          <div className="actions">
+            <button type="button" className="btn primary" onClick={() => window.location.reload()}>
+              再読み込み
+            </button>
+            <a href="/login" className="btn">
+              ログイン画面へ
+            </a>
+          </div>
+        </div>
       </div>
     );
   }

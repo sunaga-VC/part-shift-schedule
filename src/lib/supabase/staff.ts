@@ -65,36 +65,59 @@ export type StaffBootstrap = {
 };
 
 /** ログイン中ユーザー向けに departments / staff_profiles を取得 */
-export async function fetchStaffBootstrap(supabase: SupabaseClient): Promise<StaffBootstrap | null> {
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser();
-  if (userError) {
-    const code = userError.code ?? "";
-    const message = userError.message ?? "";
-    if (
-      code === "refresh_token_not_found" ||
-      code === "session_not_found" ||
-      message.includes("Refresh Token")
-    ) {
-      await supabase.auth.signOut({ scope: "local" });
+export async function fetchStaffBootstrap(
+  supabase: SupabaseClient,
+  options?: { attempts?: number; signOutOnAuthFailure?: boolean }
+): Promise<StaffBootstrap | null> {
+  const attempts = Math.max(1, options?.attempts ?? 3);
+  const signOutOnAuthFailure = options?.signOutOnAuthFailure ?? false;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+    }
+
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+    if (userError) {
+      const code = userError.code ?? "";
+      const message = userError.message ?? "";
+      if (
+        signOutOnAuthFailure &&
+        (code === "refresh_token_not_found" ||
+          code === "session_not_found" ||
+          message.includes("Refresh Token"))
+      ) {
+        await supabase.auth.signOut({ scope: "local" });
+      }
+      return null;
+    }
+    const email = user?.email?.trim().toLowerCase();
+    if (!email) return null;
+
+    const response = await fetch("/api/bootstrap/staff", {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    if (response.status === 401 || response.status === 403) {
+      // ログイン直後は Cookie 反映前で 401 になることがあるため、即 signOut しない
+      continue;
+    }
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = (await response.json()) as { ok?: boolean; bootstrap?: StaffBootstrap; message?: string };
+    if (payload.ok && payload.bootstrap?.userId) {
+      return payload.bootstrap;
     }
     return null;
   }
-  const email = user?.email?.trim().toLowerCase();
-  if (!email) return null;
 
-  const response = await fetch("/api/bootstrap/staff", { method: "GET", credentials: "same-origin" });
-  if (!response.ok) {
-    if (response.status === 401) {
-      await supabase.auth.signOut({ scope: "local" });
-    }
-    return null;
-  }
-
-  const payload = (await response.json()) as { ok?: boolean; bootstrap?: StaffBootstrap; message?: string };
-  return payload.ok ? payload.bootstrap ?? null : null;
+  return null;
 }
 
 export type StaffPersistPatch = Partial<{
