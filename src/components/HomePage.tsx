@@ -5,7 +5,7 @@ import Link from "next/link";
 import { AdminDashboard } from "@/components/AdminDashboard";
 import { AdminHomeMessages, WorkerHomeMessages } from "@/components/HomeMessages";
 import { Icons } from "@/components/icons";
-import { useShift } from "@/context/ShiftContext";
+import { useShift } from "@/components/context/ShiftContext";
 import {
   addDays,
   formatDateRangeShort,
@@ -15,7 +15,6 @@ import {
   toDateKeyJst,
 } from "@/lib/shift/dates";
 import { getStaffDisplayName } from "@/lib/shift/display";
-import { isAttendanceStatus } from "@/lib/shift/status";
 import { formatTimeRange } from "@/lib/shift/time";
 import type { ConfirmedShift, DesiredShift } from "@/lib/shift/types";
 
@@ -63,7 +62,6 @@ export function HomePage() {
           (shift) =>
             shift.staffId === userId &&
             dateSet.has(shift.date) &&
-            isAttendanceStatus(shift.status) &&
             Boolean(shift.publishedAt)
         )
         .sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime));
@@ -234,7 +232,9 @@ function WorkerWeekPanel({ week, todayKey }: { week: WorkerWeekData; todayKey: s
                   <span className="worker-day-kind confirmed">確定</span>
                   <span className={dayConfirmed.length ? "worker-day-times confirmed" : "muted"}>
                     {dayConfirmed.length
-                      ? dayConfirmed.map((s) => formatTimeRange(s.startTime, s.endTime)).join(" / ")
+                      ? dayConfirmed
+                          .map((s) => (s.status === "unconfirmed" ? "休み" : formatTimeRange(s.startTime, s.endTime)))
+                          .join(" / ")
                       : "なし"}
                   </span>
                 </div>

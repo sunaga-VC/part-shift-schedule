@@ -57,10 +57,33 @@ async function requireMasterContext(options?: {
     };
   }
 
-  const { data: me } = await supabase
+  const userEmail = user.email?.trim().toLowerCase();
+  if (!userEmail) {
+    return {
+      ok: false,
+      response: NextResponse.json({ ok: false, message: "メールアドレスが見つかりません。" }, { status: 403 }),
+    };
+  }
+
+  const service = getServiceClient();
+  if (!service) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          ok: false,
+          message:
+            "SUPABASE_SERVICE_ROLE_KEY が未設定です。Vercel / .env.local に service_role キーを追加してください。",
+        },
+        { status: 500 }
+      ),
+    };
+  }
+
+  const { data: me } = await service
     .from("staff_profiles")
     .select("role, admin_permission, status")
-    .eq("id", user.id)
+    .eq("email", userEmail)
     .maybeSingle();
 
   const permission = (me?.admin_permission ?? "general") as AdminPermission;
@@ -83,6 +106,51 @@ async function requireMasterContext(options?: {
     };
   }
 
+  return { ok: true, userId: user.id, adminPermission: permission, service };
+}
+
+/** マスタ管理権限（マネージャー / アルバイト管理者）+ service role */
+export async function requireManagerService(): Promise<MasterContext> {
+  return requireMasterContext();
+}
+
+/** 管理者アカウント操作向け（マネージャーのみ） */
+export async function requireFullManagerService(): Promise<MasterContext> {
+  return requireMasterContext({ requireFullManager: true });
+}
+
+type AuthenticatedProfileContext =
+  | {
+      ok: true;
+      authUserId: string;
+      profileId: string;
+      role: "worker" | "admin";
+      adminPermission: AdminPermission;
+      service: NonNullable<ReturnType<typeof getServiceClient>>;
+    }
+  | { ok: false; response: NextResponse };
+
+/** ログイン済みユーザー + staff_profiles（email 基準）+ service role */
+export async function requireAuthenticatedProfileService(): Promise<AuthenticatedProfileContext> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) {
+    return {
+      ok: false,
+      response: NextResponse.json({ ok: false, message: "ログインが必要です。" }, { status: 401 }),
+    };
+  }
+
+  const userEmail = user.email?.trim().toLowerCase();
+  if (!userEmail) {
+    return {
+      ok: false,
+      response: NextResponse.json({ ok: false, message: "メールアドレスが見つかりません。" }, { status: 403 }),
+    };
+  }
+
   const service = getServiceClient();
   if (!service) {
     return {
@@ -98,15 +166,105 @@ async function requireMasterContext(options?: {
     };
   }
 
-  return { ok: true, userId: user.id, adminPermission: permission, service };
+  const { data: profile } = await service
+    .from("staff_profiles")
+    .select("id, role, admin_permission, status")
+    .eq("email", userEmail)
+    .maybeSingle();
+
+  if (!profile || profile.status !== "active") {
+    return {
+      ok: false,
+      response: NextResponse.json({ ok: false, message: "有効なスタッフプロフィールが見つかりません。" }, { status: 403 }),
+    };
+  }
+
+  return {
+    ok: true,
+    authUserId: user.id,
+    profileId: profile.id,
+    role: profile.role,
+    adminPermission: (profile.admin_permission ?? "general") as AdminPermission,
+    service,
+  };
 }
 
-/** マスタ管理権限（マネージャー / アルバイト管理者）+ service role */
-export async function requireManagerService(): Promise<MasterContext> {
-  return requireMasterContext();
+/** ログイン済み管理者 + service role（シフト調整 board 用。マスタ権限は不要） */
+export async function requireAdminService(): Promise<AuthenticatedProfileContext | { ok: false; response: NextResponse }> {
+  const auth = await requireAuthenticatedProfileService();
+  if (!auth.ok) return auth;
+  if (auth.role !== "admin") {
+    return {
+      ok: false,
+      response: NextResponse.json({ ok: false, message: "管理者権限が必要です。" }, { status: 403 }),
+    };
+  }
+  return auth;
 }
 
-/** 管理者アカウント操作向け（マネージャーのみ） */
-export async function requireFullManagerService(): Promise<MasterContext> {
-  return requireMasterContext({ requireFullManager: true });
+/** auth.users の ID をメールアドレスから解決（staff_profiles.id と一致しない場合に使用） */
+export async function findAuthUserIdByEmail(
+  service: NonNullable<ReturnType<typeof getServiceClient>>,
+  email: string
+): Promise<string | null> {
+  const user = await findAuthUserByEmail(service, email);
+  return user?.id ?? null;
+}
+
+/** auth.users をメールアドレスから解決 */
+export async function findAuthUserByEmail(
+  service: NonNullable<ReturnType<typeof getServiceClient>>,
+  email: string
+): Promise<{ id: string; email: string | null } | null> {
+  const normalized = email.trim().toLowerCase();
+  if (!normalized) return null;
+
+  let page = 1;
+  const perPage = 1000;
+  while (page <= 10) {
+    const { data, error } = await service.auth.admin.listUsers({ page, perPage });
+    if (error) throw error;
+    const matched = data.users.find((user) => user.email?.trim().toLowerCase() === normalized);
+    if (matched) {
+      return { id: matched.id, email: matched.email ?? null };
+    }
+    if (data.users.length < perPage) break;
+    page += 1;
+  }
+  return null;
+}
+
+/** ログインに使われる Auth ユーザーを解決（メール優先 → プロフィール ID） */
+export async function resolveAuthUserForProfile(
+  service: NonNullable<ReturnType<typeof getServiceClient>>,
+  staffId: string,
+  profileEmail: string
+): Promise<{ id: string; email: string | null } | null> {
+  const normalized = profileEmail.trim().toLowerCase();
+  if (normalized) {
+    const byEmail = await findAuthUserByEmail(service, normalized);
+    if (byEmail) return byEmail;
+  }
+
+  const { data: byId, error } = await service.auth.admin.getUserById(staffId);
+  if (!error && byId.user) {
+    return { id: byId.user.id, email: byId.user.email ?? null };
+  }
+
+  return null;
+}
+
+/** Supabase Auth 更新エラーを利用者向けメッセージに変換 */
+export function formatAuthUpdateError(message: string): string {
+  const normalized = message.trim().toLowerCase();
+  if (normalized.includes("already") && normalized.includes("email")) {
+    return "このメールアドレスは Auth に既に登録されています。別のメールを使うか、既存アカウントを確認してください。";
+  }
+  if (normalized.includes("error updating user") || normalized.includes("database error updating user")) {
+    return "Auth ユーザーの更新に失敗しました。メールの重複、DB トリガー、Auth 設定を確認してください。";
+  }
+  if (normalized.includes("password") && normalized.includes("weak")) {
+    return "パスワードが弱すぎます。より長いパスワードにしてください。";
+  }
+  return message;
 }

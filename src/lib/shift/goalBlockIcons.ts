@@ -6,6 +6,7 @@ import {
   isOfficeGoalDepartment,
   type GoalBlockSlots,
 } from "./goal";
+import { getStaffShiftStatus, resolveAdminShiftDisplay } from "./publish-state";
 import { toMinutes } from "./time";
 import type { ConfirmedShift, DesiredShift, Staff } from "./types";
 
@@ -110,10 +111,10 @@ function buildStaffedMinutesByDepartment(input: {
     const confirmedShift = input.confirmedShifts.find(
       (shift) => shift.date === input.date && shift.staffId === staff.id
     );
-    const currentStatus = confirmedShift?.status ?? (desiredShift ? "adjusting" : "unconfirmed");
+    const currentStatus = getStaffShiftStatus(confirmedShift, desiredShift);
     if (currentStatus === "unconfirmed") continue;
 
-    const shift = confirmedShift ?? desiredShift;
+    const shift = resolveAdminShiftDisplay(confirmedShift, desiredShift, { currentStatus });
     if (!shift) continue;
 
     const overlapMinutes = calcOverlapMinutes(shift.startTime, shift.endTime, blockStart, blockEnd);

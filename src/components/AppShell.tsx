@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Icons } from "@/components/icons";
-import { useShift } from "@/context/ShiftContext";
+import { useShift } from "@/components/context/ShiftContext";
 import { createClient } from "@/lib/supabase/client";
 import { getStaffDisplayName } from "@/lib/shift/display";
 
@@ -23,8 +23,7 @@ const masterLink = { href: "/admin/master", label: "マスタ管理", Icon: Icon
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { ready, usingSupabaseAuth, state, currentUser, isAdmin, canManageMaster, setCurrentUserId, resetDemoData } =
-    useShift();
+  const { ready, currentUser, isAdmin, canManageMaster } = useShift();
   const links = isAdmin
     ? canManageMaster
       ? [...adminBaseLinks, masterLink]
@@ -34,7 +33,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   // クライアント側でも権限外URLを遮断（ブックマーク直打ち対策）
   useEffect(() => {
-    if (!ready || !currentUser || !usingSupabaseAuth) return;
+    if (!ready || !currentUser) return;
     if (!isAdmin && pathname.startsWith("/admin")) {
       window.location.replace("/");
       return;
@@ -42,7 +41,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     if (isAdmin && !canManageMaster && pathname.startsWith("/admin/master")) {
       window.location.replace("/admin/board");
     }
-  }, [ready, currentUser, usingSupabaseAuth, isAdmin, canManageMaster, pathname]);
+  }, [ready, currentUser, isAdmin, canManageMaster, pathname]);
 
   useEffect(() => {
     setMenuOpen(false);
@@ -129,32 +128,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </button>
         </div>
 
-        {!usingSupabaseAuth ? (
-          <div className="user-switch sidebar-switch">
-            <span className="muted">ログインユーザー</span>
-            <div className="sidebar-select-wrap">
-              <select value={state.currentUserId} onChange={(e) => setCurrentUserId(e.target.value)}>
-                {state.staffList
-                  .filter((s) => s.status === "active")
-                  .map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {getStaffDisplayName(s)}
-                    </option>
-                  ))}
-              </select>
-              <Icons.ChevronDown size={14} className="sidebar-select-chevron" />
-            </div>
-            <button type="button" className="btn" onClick={resetDemoData}>
-              デモ初期化
-            </button>
+        <div className="user-switch sidebar-switch">
+          <div className="muted" style={{ fontSize: 12 }}>
+            {getStaffDisplayName(currentUser)}
           </div>
-        ) : (
-          <div className="user-switch sidebar-switch">
-            <div className="muted" style={{ fontSize: 12 }}>
-              {getStaffDisplayName(currentUser)}
-            </div>
-          </div>
-        )}
+        </div>
 
         <div className="sidebar-menu">
           <nav className="nav sidebar-nav">

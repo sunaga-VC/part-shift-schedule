@@ -1,5 +1,6 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { getServiceClient } from "@/lib/supabase/adminApi";
 
 function getSupabaseKey() {
   return (
@@ -55,10 +56,28 @@ function redirectToLogin(request: NextRequest, pathname: string, clearCookies = 
   return response;
 }
 
+function isApiRoute(pathname: string) {
+  return pathname.startsWith("/api/");
+}
+
+function apiJsonError(status: number, message: string, request?: NextRequest, clearCookies = false) {
+  const response = NextResponse.json({ ok: false, message }, { status });
+  if (clearCookies && request) {
+    clearAuthCookies(request, response);
+  }
+  return response;
+}
+
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
 
   const pathname = request.nextUrl.pathname;
+  if (pathname.startsWith("/api/dev/")) {
+    return supabaseResponse;
+  }
+  if (pathname.startsWith("/api/bootstrap/")) {
+    return supabaseResponse;
+  }
   const isLoginPage = pathname === "/login";
   const isPublicAsset =
     pathname.startsWith("/_next") || pathname.startsWith("/favicon") || pathname.includes(".");
@@ -69,9 +88,12 @@ export async function updateSession(request: NextRequest) {
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
   const key = getSupabaseKey();
-  // 本番で env 未設定のときはデモモードで開けない（ログイン必須）
+  // 本番で env 未設定のときはログイン必須（Supabase 未設定では API 保護のみ）
   if (!url || !key) {
     if (process.env.NODE_ENV === "production" && !isLoginPage) {
+      if (isApiRoute(pathname)) {
+        return apiJsonError(500, "Supabase の環境変数が設定されていません。");
+      }
       return redirectToLogin(request, pathname);
     }
     return supabaseResponse;
@@ -106,6 +128,9 @@ export async function updateSession(request: NextRequest) {
       // ignore
     }
     if (!isLoginPage) {
+      if (isApiRoute(pathname)) {
+        return apiJsonError(401, "ログインセッションが無効です。再度ログインしてください。", request, true);
+      }
       return redirectToLogin(request, pathname, true);
     }
     clearAuthCookies(request, supabaseResponse);
@@ -120,21 +145,43 @@ export async function updateSession(request: NextRequest) {
   }
 
   if (!isLoggedIn) {
+    if (isApiRoute(pathname)) {
+      return apiJsonError(401, "ログインが必要です。");
+    }
     return redirectToLogin(request, pathname);
   }
 
+  const userEmail = user?.email?.trim().toLowerCase();
+  if (!userEmail) {
+    try {
+      await supabase.auth.signOut({ scope: "local" });
+    } catch {
+      // ignore
+    }
+    if (isApiRoute(pathname)) {
+      return apiJsonError(401, "メールアドレスが見つかりません。", request, true);
+    }
+    return redirectToLogin(request, pathname, true);
+  }
+
   // 権限チェック（staff_profiles.role）
-  const { data: profile } = await supabase
+  const service = getServiceClient();
+  const { data: profile } = service
+    ? await service
     .from("staff_profiles")
     .select("role, admin_permission, status")
-    .eq("id", user!.id)
-    .maybeSingle();
+    .eq("email", userEmail)
+    .maybeSingle()
+    : { data: null };
 
   if (!profile || profile.status !== "active") {
     try {
       await supabase.auth.signOut({ scope: "local" });
     } catch {
       // ignore
+    }
+    if (isApiRoute(pathname)) {
+      return apiJsonError(403, "有効なスタッフプロフィールが見つかりません。", request, true);
     }
     return redirectToLogin(request, pathname, true);
   }
@@ -147,11 +194,17 @@ export async function updateSession(request: NextRequest) {
 
   // スタッフ（worker）は管理者画面に入れない
   if (!isAdmin && isAdminRoute) {
+    if (isApiRoute(pathname)) {
+      return apiJsonError(403, "管理者権限が必要です。");
+    }
     return redirectTo(request, "/");
   }
 
   // 一般管理者はマスタ管理に入れない（アルバイト管理者は可）
   if (isAdmin && !canAccessMaster && isMasterRoute) {
+    if (isApiRoute(pathname)) {
+      return apiJsonError(403, "マスタ管理の権限が必要です。");
+    }
     return redirectTo(request, "/admin/board");
   }
 

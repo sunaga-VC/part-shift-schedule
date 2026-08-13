@@ -1197,6 +1197,11 @@ textarea {
   opacity: 0.72;
 }
 
+.day-cell.past.published-date:not(.selected),
+.day-cell.past.pending-adjustment-date:not(.selected) {
+  opacity: 0.62;
+}
+
 .day-cell.past .muted {
   color: inherit;
 }
@@ -1211,11 +1216,10 @@ textarea {
 
 .day-cell.past.pending-adjustment-date {
   background: var(--status-adjusting-soft);
-  opacity: 0.85;
 }
 
 .day-cell.past.published-date {
-  background: var(--surface-muted);
+  background: var(--status-confirmed-soft);
 }
 
 .day-cell.selected {
@@ -1223,6 +1227,15 @@ textarea {
   background: var(--surface);
   box-shadow: 0 0 0 2px var(--ink), var(--shadow-sm);
   color: var(--ink);
+  opacity: 1;
+}
+
+.wish-calendar .day-cell.selected.published-date {
+  background: var(--status-confirmed-soft);
+}
+
+.wish-calendar .day-cell.selected.pending-adjustment-date {
+  background: var(--status-adjusting-soft);
 }
 
 .day-cell.out {
@@ -1269,14 +1282,23 @@ textarea {
 .day-status-row.department-row {
   padding: 4px 2px 6px;
   border-bottom: none;
+  background: rgba(148, 163, 184, 0.08);
 }
 
 .day-status-row.department-row.published {
-  background: transparent;
+  background: rgba(34, 197, 94, 0.14);
 }
 
 .day-status-row.department-row.pending {
-  background: transparent;
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.day-cell.past .day-status-row.department-row.published {
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.day-cell.past .day-status-row.department-row.pending {
+  background: rgba(245, 158, 11, 0.08);
 }
 
 .day-status-row-label {
@@ -1552,7 +1574,8 @@ textarea {
 
 .master-table-admin th:nth-child(5),
 .master-table-admin td:nth-child(5) {
-  width: auto;
+  width: 120px;
+  max-width: 120px;
 }
 
 .master-table-admin th:nth-child(6),
@@ -1569,6 +1592,16 @@ textarea {
 
 .master-table-admin td:nth-child(5) {
   white-space: normal;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.master-table-admin td:nth-child(5) .master-display {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
 }
 
 .master-table-staff {
@@ -1741,7 +1774,15 @@ textarea {
 .admin-managed-teams {
   display: grid;
   gap: 4px;
-  min-width: 140px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.master-table-admin .admin-managed-teams {
+  max-height: 120px;
+  overflow: auto;
+  padding: 6px 8px;
+  margin: 0;
 }
 
 .admin-managed-teams .csv-dept-check {
@@ -3416,10 +3457,10 @@ textarea.master-input,
 }
 
 .admin-board-page .day-cell-edit-btn {
-  min-height: 28px;
-  min-width: 28px;
-  padding: 4px 6px !important;
-  font-size: 12px !important;
+  min-height: 22px;
+  min-width: 22px;
+  padding: 2px 4px !important;
+  font-size: 10px !important;
   line-height: 1 !important;
   border-radius: var(--radius-full);
   background: var(--surface);

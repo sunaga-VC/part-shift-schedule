@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CalendarNavToolbar } from "@/components/CalendarNavToolbar";
 import { Icons } from "@/components/icons";
-import { useShift } from "@/context/ShiftContext";
+import { useShift } from "@/components/context/ShiftContext";
 import { useWorkCalendarNavigation } from "@/hooks/useWorkCalendarNavigation";
 import {
   formatDateShort,
@@ -25,7 +25,7 @@ import {
   getGoalDepartmentLabel,
 } from "@/lib/shift/goal";
 import { getGoalMemosForDate } from "@/lib/shift/goalMemos";
-import { isAttendanceStatus } from "@/lib/shift/status";
+import { getShiftStatusRingColor, isAttendanceStatus } from "@/lib/shift/status";
 import {
   buildGoalBlockIconDisplays,
   buildGoalBlockIconKey,
@@ -37,8 +37,14 @@ import {
   type GoalBlockIconKind,
 } from "@/lib/shift/goalBlockIcons";
 import { canOperateDepartment, getManagedDepartmentsForAdmin, listOperableDepartmentNames } from "@/lib/shift/adminDepartments";
+import {
+  getAdminShiftStatus,
+  hasStaffPendingAdjustment,
+  isDepartmentCalendarDatePublished,
+  resolveAdminShiftDisplay,
+} from "@/lib/shift/publish-state";
 import { buildWeeklyStaffSummary } from "@/lib/shift/summary";
-import { formatConfirmedWithDiff, formatMinutes, formatShiftSummary, formatTimeRange, toMinutes } from "@/lib/shift/time";
+import { formatConfirmedWithDiff, formatMinutes, formatShiftSummary, formatTimeRange, normalizeDisplayTime, toMinutes } from "@/lib/shift/time";
 import type { ConfirmedShift } from "@/lib/shift/types";
 
 /** 在宅用: 時間帯の円弧だけを点線で描く（終了以降は描画しない） */
@@ -83,6 +89,7 @@ export function AdminBoard() {
     updateDesiredShiftTimes,
     updateConfirmedShift,
     publishConfirmed,
+    flushShiftPersist,
     upsertRequired,
     setGoalBlocksForDate,
   } = useShift();
@@ -105,6 +112,16 @@ export function AdminBoard() {
   const [viewMode, setViewMode] = useState<"calendar" | "day" | "workers">("day");
   const statusRank = (status: ConfirmedShift["status"]) =>
     isAttendanceStatus(status) ? 0 : status === "adjusting" ? 1 : 2;
+  const resolveShiftStatus = (
+    confirmedShift: ConfirmedShift | undefined,
+    desiredShift: (typeof state.desiredShifts)[number] | undefined,
+    date: string
+  ) => getAdminShiftStatus(confirmedShift, desiredShift);
+  const isResubmissionPending = (
+    confirmedShift: ConfirmedShift | undefined,
+    desiredShift: (typeof state.desiredShifts)[number] | undefined,
+    date: string
+  ) => hasStaffPendingAdjustment(state.period, confirmedShift, desiredShift, date);
   const [selectedDate, setSelectedDate] = useState(defaultSelectedDateKey);
   const [selectedWorkerId, setSelectedWorkerId] = useState(state.staffList.find((s) => s.role === "worker")?.id ?? "");
   const [selectedWeekIndex, setSelectedWeekIndex] = useState(0);
@@ -148,8 +165,14 @@ export function AdminBoard() {
   const desired = state.desiredShifts
     .filter((s) => s.date === selectedDate)
     .sort((a, b) => {
-      const aStatus = confirmed.find((c) => c.staffId === a.staffId)?.status ?? "adjusting";
-      const bStatus = confirmed.find((c) => c.staffId === b.staffId)?.status ?? "adjusting";
+      const aStatus = getAdminShiftStatus(
+        confirmed.find((c) => c.staffId === a.staffId),
+        a
+      );
+      const bStatus = getAdminShiftStatus(
+        confirmed.find((c) => c.staffId === b.staffId),
+        b
+      );
       const statusDiff = statusRank(aStatus) - statusRank(bStatus);
       if (statusDiff !== 0) return statusDiff;
       const aStaff = getStaffDisplayName(workers.find((w) => w.id === a.staffId));
@@ -167,7 +190,7 @@ export function AdminBoard() {
           const confirmedShift = state.confirmedShifts.find(
             (shift) => shift.date === selectedDate && shift.staffId === staff.id
           );
-          const currentStatus = confirmedShift?.status ?? (desiredShift ? "adjusting" : "unconfirmed");
+          const currentStatus = resolveShiftStatus(confirmedShift, desiredShift, selectedDate);
           return { staff, desiredShift, confirmedShift, currentStatus };
         })
         .sort((a, b) => {
@@ -175,7 +198,7 @@ export function AdminBoard() {
           if (statusDiff !== 0) return statusDiff;
           return getStaffDisplayName(a.staff).localeCompare(getStaffDisplayName(b.staff));
         }),
-    [activeWorkers, selectedDate, state.confirmedShifts, state.desiredShifts]
+    [activeWorkers, selectedDate, state.confirmedShifts, state.desiredShifts, state.period]
   );
 
 
@@ -198,7 +221,7 @@ export function AdminBoard() {
     [selectedWeekDates, state.desiredShifts]
   );
   const weeklyViewConfirmed = useMemo(
-    () => state.confirmedShifts.filter((shift) => selectedWeekDates.includes(shift.date) && isAttendanceStatus(shift.status)),
+    () => state.confirmedShifts.filter((shift) => selectedWeekDates.includes(shift.date) && Boolean(shift.publishedAt)),
     [selectedWeekDates, state.confirmedShifts]
   );
   const selectedWeekSummaries = useMemo(
@@ -359,18 +382,25 @@ export function AdminBoard() {
             const confirmedShift = state.confirmedShifts.find(
               (shift) => shift.date === date && shift.staffId === staff.id
             );
-            const currentStatus = confirmedShift?.status ?? (desiredShift ? "adjusting" : "unconfirmed");
-            return currentStatus === "adjusting" ? [{ date, name: getStaffDisplayName(staff) }] : [];
+            const currentStatus = resolveShiftStatus(confirmedShift, desiredShift, date);
+            return isResubmissionPending(confirmedShift, desiredShift, date)
+              ? [{ date, name: getStaffDisplayName(staff) }]
+              : [];
           })
         );
         return { department, issues, summaries };
       }),
     [activeWorkers, masterDepartments, selectedWeekDates, selectedWeekSummaries, state.confirmedShifts, state.desiredShifts, state.staffList]
   );
-  function handlePublishDepartment(department: string) {
+  async function handlePublishDepartment(department: string) {
     if (!selectedWeekDates[0]) return;
     if (!canOperateDepartment(currentUser, department, masterDepartments)) return;
     publishConfirmed("week", selectedWeekDates[0], department);
+    const result = await flushShiftPersist();
+    if (!result.ok) {
+      window.alert(`確定の保存に失敗しました: ${result.message}`);
+      return;
+    }
     setPublishModalDepartment(null);
   }
 
@@ -430,14 +460,14 @@ export function AdminBoard() {
                 const desiredShift = state.desiredShifts.find(
                   (shift) => shift.staffId === summary.staffId && shift.date === date
                 );
-                const currentStatus = confirmedShift?.status ?? (desiredShift ? "adjusting" : "unconfirmed");
-                const cellShift = confirmedShift ?? desiredShift;
-                if (!cellShift || confirmedShift?.status === "unconfirmed") {
+                const currentStatus = resolveShiftStatus(confirmedShift, desiredShift, date);
+                const cellShift = resolveAdminShiftDisplay(confirmedShift, desiredShift, { currentStatus });
+                if (!cellShift || currentStatus === "unconfirmed") {
                   return { value: "0", isAdjusting: false };
                 }
                 return {
                   value: formatMinutes(cellShift.actualMinutes).replace(/h$/, ""),
-                  isAdjusting: currentStatus === "adjusting",
+                  isAdjusting: isResubmissionPending(confirmedShift, desiredShift, date),
                 };
               });
               return (
@@ -546,6 +576,9 @@ export function AdminBoard() {
     };
 
     const handlePointerUp = () => {
+      if (dragRef.current) {
+        void flushShiftPersist();
+      }
       dragRef.current = null;
     };
 
@@ -555,7 +588,7 @@ export function AdminBoard() {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
-  }, [updateDesiredShiftTimes]);
+  }, [updateDesiredShiftTimes, flushShiftPersist]);
   const handleEditRequiredHours = (date: string) => {
     const departments = getGoalDisplayDepartments(masterDepartments);
     const goalBlocks = getGoalBlocksForDate(state, date);
@@ -672,8 +705,10 @@ export function AdminBoard() {
                         const confirmedShift = state.confirmedShifts.find(
                           (shift) => shift.date === date && shift.staffId === staff.id
                         );
-                        const currentStatus = confirmedShift?.status ?? (desiredShift ? "adjusting" : "unconfirmed");
-                        return { staff, currentStatus, shift: confirmedShift ?? desiredShift ?? null };
+                        const currentStatus = resolveShiftStatus(confirmedShift, desiredShift, date);
+                        const pendingResubmission = isResubmissionPending(confirmedShift, desiredShift, date);
+                        const shift = resolveAdminShiftDisplay(confirmedShift, desiredShift, { currentStatus }) ?? null;
+                        return { staff, desiredShift, confirmedShift, currentStatus, pendingResubmission, shift };
                       })
                       .sort((a, b) => getStaffDisplayName(a.staff).localeCompare(getStaffDisplayName(b.staff)));
                     const departmentNames = getGoalDisplayDepartments(masterDepartments);
@@ -732,27 +767,29 @@ export function AdminBoard() {
                               handleEditRequiredHours(date);
                             }}
                           >
-                            <Icons.Pencil size={13} />
+                            <Icons.Pencil size={10} strokeWidth={2.2} />
                           </button>
                         </div>
                         <div className="day-meta day-status-strip">
                           {departmentRows.map(({ department, entries }, index) => {
-                            const isPublished = entries.length > 0 && entries.every(({ currentStatus }) => isAttendanceStatus(currentStatus));
-                            const isPending = entries.some(({ currentStatus }) => currentStatus === "adjusting");
+                            const isPublished = isDepartmentCalendarDatePublished(
+                              date,
+                              department,
+                              state.period,
+                              state.staffList,
+                              state.confirmedShifts,
+                              { knownDepartments }
+                            );
+                            const hasPendingAdjustment = entries.some(({ pendingResubmission }) => pendingResubmission);
                             return (
                               <div
                                 key={department}
-                                className={`day-status-row department-row${isPublished ? " published" : ""}${isPending ? " pending" : ""}`}
+                                className={`day-status-row department-row${isPublished ? " published" : ""}${hasPendingAdjustment ? " pending" : ""}`}
                                 style={{ borderBottom: index < departmentRows.length - 1 ? "1px solid var(--line)" : undefined }}
                               >
                                 <div className="day-status-row-icons">
                                   {entries.map(({ staff, currentStatus, shift }) => {
-                                    const statusColor =
-                                      isAttendanceStatus(currentStatus)
-                                        ? "#22c55e"
-                                        : currentStatus === "adjusting"
-                                          ? "#f59e0b"
-                                          : "#9ca3af";
+                                    const statusColor = getShiftStatusRingColor(currentStatus);
                                     const startPct = shift
                                       ? Math.max(
                                           0,
@@ -1124,6 +1161,9 @@ export function AdminBoard() {
                       ) : (
                         entries.map(({ staff, desiredShift, confirmedShift, currentStatus }) => {
                           const editableDesired = desiredShift;
+                          const displayShift = resolveAdminShiftDisplay(confirmedShift, desiredShift, {
+                            currentStatus,
+                          });
                           const canEditStatus = canOperate && Boolean(editableDesired || confirmedShift);
                           const canEditTime =
                             canOperate && currentStatus !== "unconfirmed" && Boolean(editableDesired);
@@ -1154,15 +1194,15 @@ export function AdminBoard() {
                                 <div className="timeline-worker-meta">
                                   <span className="timeline-worker-name-row">
                                     <span>{getStaffDisplayName(staff)}</span>
-                                    {(desiredShift?.note || confirmedShift?.note)?.trim() ? (
+                                    {(displayShift?.note)?.trim() ? (
                                       <span
                                         className="gantt-worker-note-alert"
                                         tabIndex={0}
-                                        aria-label={`備考: ${(desiredShift?.note || confirmedShift?.note || "").trim()}`}
+                                        aria-label={`備考: ${(displayShift?.note || "").trim()}`}
                                       >
                                         <Icons.Alert size={18} strokeWidth={2.6} />
                                         <span className="gantt-worker-note-tooltip" role="tooltip">
-                                          {(desiredShift?.note || confirmedShift?.note || "").trim()}
+                                          {(displayShift?.note || "").trim()}
                                         </span>
                                       </span>
                                     ) : null}
@@ -1182,37 +1222,37 @@ export function AdminBoard() {
                                     />
                                   ))}
                                 </div>
-                                {desiredShift ? (
+                                {displayShift ? (
                                   <>
                                     <div
                                       className={`gantt-bar ${currentStatus}`}
                                       style={{
-                                        left: `${((Math.max(toMinutes(desiredShift.startTime), 10 * 60) - 10 * 60) / (9 * 60)) * 100}%`,
+                                        left: `${((Math.max(toMinutes(displayShift.startTime), 10 * 60) - 10 * 60) / (9 * 60)) * 100}%`,
                                         width: `${Math.max(
-                                          ((Math.min(toMinutes(desiredShift.endTime), 19 * 60) -
-                                            Math.max(toMinutes(desiredShift.startTime), 10 * 60)) /
+                                          ((Math.min(toMinutes(displayShift.endTime), 19 * 60) -
+                                            Math.max(toMinutes(displayShift.startTime), 10 * 60)) /
                                             (9 * 60)) *
                                             100,
                                           4
                                         )}%`,
                                       }}
-                                      title={`${getStaffDisplayName(staff)}さん ${formatTimeRange(desiredShift.startTime, desiredShift.endTime)}`}
+                                      title={`${getStaffDisplayName(staff)}さん ${formatTimeRange(displayShift.startTime, displayShift.endTime)}`}
                                     >
                                       {canEditTime ? (
                                         <>
-                                          <span className="gantt-time-start">{" "}{desiredShift.startTime}</span>
+                                          <span className="gantt-time-start">{" "}{normalizeDisplayTime(displayShift.startTime)}</span>
                                           <span className="gantt-center-stack">
                                             <span className="gantt-time-center">
-                                              {formatTimeRange(desiredShift.startTime, desiredShift.endTime)}
+                                              {formatTimeRange(displayShift.startTime, displayShift.endTime)}
                                             </span>
-                                            {desiredShift.breakMinutes > 0 ? (
+                                            {displayShift.breakMinutes > 0 ? (
                                               <span className="gantt-break">
                                                 <span className="gantt-break-mark">休</span>
-                                                <span>{formatMinutes(desiredShift.breakMinutes)}</span>
+                                                <span>{formatMinutes(displayShift.breakMinutes)}</span>
                                               </span>
                                             ) : null}
                                           </span>
-                                          <span className="gantt-time-end">{desiredShift.endTime}{" "}</span>
+                                          <span className="gantt-time-end">{normalizeDisplayTime(displayShift.endTime)}{" "}</span>
                                           <span
                                             className="gantt-handle start"
                                             onPointerDown={(e) => {
@@ -1250,13 +1290,13 @@ export function AdminBoard() {
                                         </>
                                       ) : (
                                         <>
-                                          <span className="gantt-time-start">{" "}{desiredShift.startTime}</span>
+                                          <span className="gantt-time-start">{" "}{normalizeDisplayTime(displayShift.startTime)}</span>
                                           <span className="gantt-center-stack">
                                             <span className="gantt-time-center">
-                                              {formatTimeRange(desiredShift.startTime, desiredShift.endTime)}
+                                              {formatTimeRange(displayShift.startTime, displayShift.endTime)}
                                             </span>
                                           </span>
-                                          <span className="gantt-time-end">{desiredShift.endTime}{" "}</span>
+                                          <span className="gantt-time-end">{normalizeDisplayTime(displayShift.endTime)}{" "}</span>
                                         </>
                                       )}
                                     </div>

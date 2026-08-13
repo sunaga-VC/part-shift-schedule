@@ -23,23 +23,18 @@ import {
   canManageMaster as hasMasterPermission,
   normalizeAdminPermission,
 } from "@/lib/shift/permissions";
-import { createInitialState } from "@/lib/shift/seed";
-import { isAttendanceStatus } from "@/lib/shift/status";
+import { hasWishChangedAfterPublish } from "@/lib/shift/publish-state";
+import { isAttendanceStatus, isPublishedConfirmedShift } from "@/lib/shift/status";
 import { DEFAULT_CONTRACT_RENEWAL_MONTHS } from "@/lib/shift/staffEmployment";
-import { calcActualMinutes, calcBreakMinutes, isValidTimeRange } from "@/lib/shift/time";
+import { calcActualMinutes, calcBreakMinutes, isValidTimeRange, normalizeDisplayTime } from "@/lib/shift/time";
 import { createClient } from "@/lib/supabase/client";
 import {
-  loadShiftSnapshotFromSupabase,
-  persistShiftSnapshotToSupabase,
-  persistWorkerDesiredShiftsToSupabase,
+  createEmptyAppState,
+  createEmptyShiftPersistenceFallback,
   type ShiftPersistenceSnapshot,
 } from "@/lib/supabase/shiftPersistence";
 import {
   fetchStaffBootstrap,
-  persistSalaryRaise,
-  persistSalaryRaiseUpdate,
-  persistStaffDelete,
-  persistStaffUpdate,
   type StaffPersistPatch,
 } from "@/lib/supabase/staff";
 import type {
@@ -54,7 +49,6 @@ import type {
   Staff,
 } from "@/lib/shift/types";
 
-const STORAGE_KEY = "shift-app-state-v1";
 
 type StaffEditableFields = Pick<
   Staff,
@@ -120,20 +114,28 @@ function normalizeStaff(staff: Staff): Staff {
 }
 
 function normalizeDesiredShift(shift: DesiredShift): DesiredShift {
-  const breakMinutes = calcBreakMinutes(shift.startTime, shift.endTime);
+  const startTime = normalizeDisplayTime(shift.startTime);
+  const endTime = normalizeDisplayTime(shift.endTime);
+  const breakMinutes = calcBreakMinutes(startTime, endTime);
   return {
     ...shift,
+    startTime,
+    endTime,
     breakMinutes,
-    actualMinutes: calcActualMinutes(shift.startTime, shift.endTime, breakMinutes),
+    actualMinutes: calcActualMinutes(startTime, endTime, breakMinutes),
   };
 }
 
 function normalizeConfirmedShift(shift: ConfirmedShift): ConfirmedShift {
-  const breakMinutes = calcBreakMinutes(shift.startTime, shift.endTime);
+  const startTime = normalizeDisplayTime(shift.startTime);
+  const endTime = normalizeDisplayTime(shift.endTime);
+  const breakMinutes = calcBreakMinutes(startTime, endTime);
   return {
     ...shift,
+    startTime,
+    endTime,
     breakMinutes,
-    actualMinutes: calcActualMinutes(shift.startTime, shift.endTime, breakMinutes),
+    actualMinutes: calcActualMinutes(startTime, endTime, breakMinutes),
   };
 }
 
@@ -146,10 +148,15 @@ type WishInput = {
 
 type ShiftStatus = "confirmed" | "unconfirmed";
 
+function formatShiftPersistError(message: string): string {
+  if (message.includes("confirmed_shift_status") && message.includes("remote")) {
+    return `${message}\n\n在宅（remote）用の DB マイグレーションが未適用です。Supabase SQL Editor では次の2つを別々に実行してください:\n1) supabase/migrations/20260812230000_add_remote_shift_status.sql\n2) supabase/migrations/20260812230001_confirmed_shifts_select_policy_remote.sql\n\nまたは SUPABASE_DB_URL を設定して npm run db:patch-schema を実行してください。`;
+  }
+  return message;
+}
+
 type ShiftContextValue = {
   ready: boolean;
-  /** Supabase Auth でログイン中（デモ切替を出さない） */
-  usingSupabaseAuth: boolean;
   state: AppState;
   currentUser: Staff | undefined;
   isAdmin: boolean;
@@ -158,7 +165,6 @@ type ShiftContextValue = {
   /** 管理者アカウントを管理できる（マネージャーのみ） */
   canManageAdminAccounts: boolean;
   workers: Staff[];
-  setCurrentUserId: (id: string) => void;
   updatePeriod: (patch: Partial<ShiftPeriod>) => void;
   updateGoalBlockCount: (date: string, blockIndex: number, delta: number) => void;
   updateGoalBlockDepartment: (date: string, blockIndex: number, iconIndex: number, department: string) => void;
@@ -167,9 +173,18 @@ type ShiftContextValue = {
   upsertGoalMemo: (memo: Omit<GoalMemo, "id"> & { id?: string }) => void;
   deleteGoalMemo: (memoId: string) => void;
   updateStaff: (staffId: string, patch: Partial<StaffEditableFields>) => void;
+  /** 編集モーダル保存向け: Supabase に即時反映して一覧を再取得 */
+  saveStaffProfile: (
+    staffId: string,
+    patch: Partial<StaffEditableFields>
+  ) => Promise<{ ok: true } | { ok: false; message: string }>;
   changeStaffPassword: (
     staffId: string,
     password: string
+  ) => Promise<{ ok: true; message?: string } | { ok: false; message: string }>;
+  /** 保留中のスタッフ更新（メール等）を即時 DB 反映 */
+  flushStaffPersistForStaff: (
+    staffId: string
   ) => Promise<{ ok: true } | { ok: false; message: string }>;
   createStaff: (
     input: StaffEditableFields
@@ -193,6 +208,8 @@ type ShiftContextValue = {
   deleteDepartment: (name: string) => Promise<{ ok: true } | { ok: false; message: string }>;
   upsertDesiredShift: (input: WishInput) => { ok: true } | { ok: false; message: string };
   deleteDesiredShift: (date: string) => { ok: true } | { ok: false; message: string };
+  /** Supabase 利用時: シフト変更を DB に即時反映 */
+  flushShiftPersist: () => Promise<{ ok: true } | { ok: false; message: string }>;
   updateDesiredShiftTimes: (
     desiredId: string,
     startTime: string,
@@ -212,118 +229,11 @@ type ShiftContextValue = {
     body: string;
     audience: "all" | "team";
     team?: string;
-  }) => { ok: true } | { ok: false; message: string };
-  deleteHomeMessage: (messageId: string) => void;
-  resetDemoData: () => void;
+  }) => Promise<{ ok: true } | { ok: false; message: string }>;
+  deleteHomeMessage: (messageId: string) => Promise<void>;
 };
 
 const ShiftContext = createContext<ShiftContextValue | null>(null);
-
-function loadState(): AppState {
-  if (typeof window === "undefined") return createInitialState();
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return createInitialState();
-    const parsed = JSON.parse(raw) as AppState;
-    if (!parsed?.period?.id || !Array.isArray(parsed.desiredShifts)) {
-      return createInitialState();
-    }
-    const parsedGoalBlocks = parsed.goalBlocksByDate ?? {};
-    return {
-      ...createInitialState(),
-      ...parsed,
-      staffList: Array.isArray(parsed.staffList) ? parsed.staffList.map(normalizeStaff) : createInitialState().staffList,
-      goalBlocksByDate:
-        parsedGoalBlocks && typeof parsedGoalBlocks === "object"
-          ? Object.fromEntries(
-              Object.entries(parsedGoalBlocks).map(([date, blocks]) => [date, normalizeGoalBlocks(blocks)])
-            )
-          : {},
-      goalMemos: Array.isArray(parsed.goalMemos)
-        ? parsed.goalMemos
-            .filter((m): m is GoalMemo => Boolean(m && typeof m === "object" && typeof m.id === "string"))
-            .map((m) => {
-              const raw = m as GoalMemo & Record<string, unknown>;
-              const frequency =
-                raw.frequency === "daily" || raw.frequency === "weekdays" || raw.frequency === "monthly"
-                  ? raw.frequency
-                  : Array.isArray(raw.weekdays) && raw.weekdays.length > 0
-                    ? "weekdays"
-                    : "daily";
-              return {
-                id: String(raw.id),
-                body: String(raw.body ?? ""),
-                startDate: String(raw.startDate ?? ""),
-                endDate: String(raw.endDate ?? ""),
-                frequency,
-                weekdays: Array.isArray(raw.weekdays)
-                  ? raw.weekdays.map((d) => Number(d)).filter((d) => d >= 1 && d <= 5)
-                  : [],
-                repeatMonths: Math.max(1, Number(raw.repeatMonths) || 3),
-                monthlyMode: raw.monthlyMode === "range" ? "range" : "single",
-                monthDay: Math.min(31, Math.max(1, Number(raw.monthDay) || 1)),
-                monthDayStart: Math.min(31, Math.max(1, Number(raw.monthDayStart) || 1)),
-                monthDayEnd: Math.min(31, Math.max(1, Number(raw.monthDayEnd) || 1)),
-              };
-            })
-        : [],
-      departments:
-        Array.isArray(parsed.departments) && parsed.departments.length > 0
-          ? parsed.departments
-          : Array.from(
-              new Set((Array.isArray(parsed.staffList) ? parsed.staffList : createInitialState().staffList).map((s) => s.team))
-            ),
-      period: {
-        ...createInitialState().period,
-        ...parsed.period,
-        publishedWeekStartDate: parsed.period.publishedWeekStartDate ?? null,
-      },
-      desiredShifts: Array.isArray(parsed.desiredShifts)
-        ? parsed.desiredShifts.map(normalizeDesiredShift)
-        : createInitialState().desiredShifts,
-      confirmedShifts: Array.isArray(parsed.confirmedShifts)
-        ? parsed.confirmedShifts.map((shift) =>
-            parsed.period.adjustmentStatus === "published"
-              ? normalizeConfirmedShift(shift)
-              : { ...normalizeConfirmedShift(shift), publishedAt: null }
-          )
-        : createInitialState().confirmedShifts,
-      requiredShifts: Array.isArray(parsed.requiredShifts)
-        ? parsed.requiredShifts.map((item) => ({
-            ...item,
-            departmentRequiredMinutes: item.departmentRequiredMinutes ?? {},
-            note: item.note ?? "",
-          }))
-        : createInitialState().requiredShifts,
-      homeMessages: Array.isArray(parsed.homeMessages)
-        ? parsed.homeMessages
-            .filter((m): m is HomeMessage => Boolean(m && typeof m === "object" && typeof m.id === "string"))
-            .map((m) => ({
-              id: m.id,
-              body: String(m.body ?? ""),
-              createdAt: String(m.createdAt ?? ""),
-              createdByStaffId: String(m.createdByStaffId ?? ""),
-              audience: m.audience === "team" ? "team" : "all",
-              team: String(m.team ?? ""),
-            }))
-        : createInitialState().homeMessages,
-    };
-  } catch {
-    return createInitialState();
-  }
-}
-
-async function detectSupabaseSession(): Promise<boolean> {
-  try {
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    return Boolean(user);
-  } catch {
-    return false;
-  }
-}
 
 function buildShiftPersistenceSnapshot(state: AppState): ShiftPersistenceSnapshot {
   return {
@@ -333,6 +243,7 @@ function buildShiftPersistenceSnapshot(state: AppState): ShiftPersistenceSnapsho
     requiredShifts: state.requiredShifts,
     goalBlocksByDate: state.goalBlocksByDate,
     goalMemos: state.goalMemos,
+    workerPublishedDates: state.workerPublishedDates,
   };
 }
 
@@ -352,37 +263,304 @@ function buildShiftPersistenceSignature(snapshot: ShiftPersistenceSnapshot): str
   });
 }
 
+async function fetchShiftSnapshotFromApi(): Promise<ShiftPersistenceSnapshot | null> {
+  const response = await fetch("/api/shifts");
+  if (!response.ok) {
+    console.warn("GET /api/shifts failed", response.status);
+    return null;
+  }
+  const payload = (await response.json()) as { ok?: boolean; snapshot?: ShiftPersistenceSnapshot; message?: string };
+  if (!payload.ok) {
+    console.warn("GET /api/shifts rejected", payload.message);
+    return null;
+  }
+  return payload.snapshot ?? null;
+}
+
+async function fetchHomeMessagesFromApi(): Promise<HomeMessage[]> {
+  const response = await fetch("/api/messages");
+  if (!response.ok) return [];
+  const payload = (await response.json()) as { ok?: boolean; messages?: HomeMessage[] };
+  return payload.ok && Array.isArray(payload.messages) ? payload.messages : [];
+}
+
+async function reloadRemoteAppData(): Promise<{
+  bootstrap: Awaited<ReturnType<typeof fetchStaffBootstrap>>;
+  shiftSnapshot: ShiftPersistenceSnapshot;
+  homeMessages: HomeMessage[];
+}> {
+  const supabase = createClient();
+  const [bootstrap, shiftSnapshot, homeMessages] = await Promise.all([
+    fetchStaffBootstrap(supabase),
+    fetchShiftSnapshotFromApi(),
+    fetchHomeMessagesFromApi(),
+  ]);
+  return {
+    bootstrap,
+    shiftSnapshot: shiftSnapshot ?? createEmptyShiftPersistenceFallback(),
+    homeMessages,
+  };
+}
+
+async function readApiJson<T extends { ok?: boolean; message?: string }>(
+  response: Response,
+  fallbackMessage: string
+): Promise<T> {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    if (response.status === 401) {
+      throw new Error("ログインセッションが切れました。再度ログインしてからお試しください。");
+    }
+    throw new Error(`${fallbackMessage}（サーバー応答 ${response.status}）`);
+  }
+  return (await response.json()) as T;
+}
+
+async function persistStaffPatchViaApi(
+  staffId: string,
+  patch: StaffPersistPatch
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const response = await fetch("/api/staff", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: staffId, patch }),
+    credentials: "same-origin",
+  });
+  try {
+    const payload = await readApiJson<{ ok: boolean; message?: string }>(
+      response,
+      "スタッフ情報の保存に失敗しました。"
+    );
+    return payload.ok
+      ? { ok: true }
+      : { ok: false, message: payload.message || "スタッフ情報の保存に失敗しました。" };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : "スタッフ情報の保存に失敗しました。",
+    };
+  }
+}
+
 export function ShiftProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<AppState>(createInitialState);
+  const [state, setState] = useState<AppState>(createEmptyAppState);
   const [ready, setReady] = useState(false);
-  const [usingSupabaseAuth, setUsingSupabaseAuth] = useState(false);
-  const usingSupabaseAuthRef = useRef(false);
   const staffPersistTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const staffPersistPatches = useRef<Record<string, StaffPersistPatch>>({});
-  const latestShiftSnapshotRef = useRef<ShiftPersistenceSnapshot>(buildShiftPersistenceSnapshot(createInitialState()));
+  const latestShiftSnapshotRef = useRef<ShiftPersistenceSnapshot>(buildShiftPersistenceSnapshot(createEmptyAppState()));
   const lastShiftPersistSignatureRef = useRef("");
+  const shiftPersistInFlightRef = useRef(0);
+  const shiftReloadPendingRef = useRef(false);
+  const shiftReloadDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shiftPersistDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shiftPersistQueuedRef = useRef(false);
   const currentUserForSync = state.staffList.find((staff) => staff.id === state.currentUserId);
+
+  const finishShiftPersist = useCallback((user?: Staff) => {
+    shiftPersistInFlightRef.current = Math.max(0, shiftPersistInFlightRef.current - 1);
+    if (shiftPersistInFlightRef.current === 0 && shiftReloadPendingRef.current) {
+      shiftReloadPendingRef.current = false;
+      void fetchShiftSnapshotFromApi().then((next) => {
+        if (!next) return;
+        lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(next);
+        setState((prev) => ({
+          ...prev,
+          ...next,
+          staffList: prev.staffList,
+          departments: prev.departments,
+          currentUserId: prev.currentUserId,
+        }));
+      });
+    }
+    if (shiftPersistInFlightRef.current === 0 && shiftPersistQueuedRef.current && user) {
+      shiftPersistQueuedRef.current = false;
+      const latestSignature = buildShiftPersistenceSignature(latestShiftSnapshotRef.current);
+      if (latestSignature !== lastShiftPersistSignatureRef.current) {
+        void runShiftPersistRef.current?.(user);
+      }
+    }
+  }, []);
+
+  const runShiftPersistRef = useRef<((user: Staff) => Promise<void>) | null>(null);
+
+  const persistSnapshotViaApi = useCallback(
+    async (
+      user: Staff,
+      snapshot: ShiftPersistenceSnapshot
+    ): Promise<{ ok: true } | { ok: false; message: string }> => {
+      try {
+        if (user.role === "worker") {
+          const workerSnapshot: ShiftPersistenceSnapshot = {
+            ...snapshot,
+            desiredShifts: snapshot.desiredShifts.filter((shift) => shift.staffId === user.id),
+          };
+          const response = await fetch("/api/shifts/worker", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ snapshot: workerSnapshot }),
+          });
+          const payload = (await response.json().catch(() => null)) as {
+            ok?: boolean;
+            message?: string;
+            periodId?: string;
+          } | null;
+          if (!response.ok || !payload?.ok) {
+            return { ok: false, message: payload?.message || "希望シフトの保存に失敗しました。" };
+          }
+          if (payload.periodId && payload.periodId !== snapshot.period.id) {
+            setState((prev) => ({
+              ...prev,
+              period: { ...prev.period, id: payload.periodId! },
+              desiredShifts: prev.desiredShifts.map((shift) => ({ ...shift, periodId: payload.periodId! })),
+              confirmedShifts: prev.confirmedShifts.map((shift) => ({ ...shift, periodId: payload.periodId! })),
+              requiredShifts: prev.requiredShifts.map((shift) => ({ ...shift, periodId: payload.periodId! })),
+            }));
+          }
+          return { ok: true };
+        }
+
+        const response = await fetch("/api/shifts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ snapshot }),
+        });
+        const payload = (await response.json().catch(() => null)) as { ok?: boolean; message?: string } | null;
+        if (!response.ok || !payload?.ok) {
+          return {
+            ok: false,
+            message: formatShiftPersistError(payload?.message || "シフト保存に失敗しました。"),
+          };
+        }
+        return { ok: true };
+      } catch (error) {
+        return {
+          ok: false,
+          message: error instanceof Error ? error.message : "シフト保存に失敗しました。",
+        };
+      }
+    },
+    []
+  );
+
+  const runShiftPersist = useCallback(
+    async (user: Staff) => {
+      if (shiftPersistInFlightRef.current > 0) {
+        shiftPersistQueuedRef.current = true;
+        return;
+      }
+
+      const snapshot = latestShiftSnapshotRef.current;
+      const signature = buildShiftPersistenceSignature(snapshot);
+      if (lastShiftPersistSignatureRef.current === signature) return;
+
+      shiftPersistInFlightRef.current += 1;
+      try {
+        const result = await persistSnapshotViaApi(user, snapshot);
+        if (!result.ok) {
+          lastShiftPersistSignatureRef.current = "";
+          window.alert(`シフトの DB 保存に失敗しました: ${formatShiftPersistError(result.message)}`);
+          return;
+        }
+        lastShiftPersistSignatureRef.current = signature;
+      } finally {
+        finishShiftPersist(user);
+      }
+    },
+    [finishShiftPersist, persistSnapshotViaApi]
+  );
+
+  runShiftPersistRef.current = runShiftPersist;
+
+  const applyStaffPersistPatch = useCallback(
+    async (
+      staffId: string,
+      patch: Partial<StaffEditableFields>
+    ): Promise<{ ok: true } | { ok: false; message: string }> => {
+      try {
+        const { email: nextEmail, ...profilePatch } = patch;
+        if (typeof nextEmail === "string") {
+          const email = nextEmail.trim().toLowerCase();
+          if (email) {
+            const response = await fetch("/api/staff", {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: staffId, email }),
+              credentials: "same-origin",
+            });
+            const payload = await readApiJson<{ ok: boolean; message?: string }>(
+              response,
+              "メールアドレスの更新に失敗しました。"
+            );
+            if (!payload.ok) {
+              return { ok: false as const, message: payload.message || "メールアドレスの更新に失敗しました。" };
+            }
+          }
+        }
+
+        if (Object.keys(profilePatch).length > 0) {
+          const result = await persistStaffPatchViaApi(staffId, profilePatch);
+          if (!result.ok) {
+            return { ok: false as const, message: result.message || "スタッフ情報の保存に失敗しました。" };
+          }
+        }
+
+        return { ok: true as const };
+      } catch (error) {
+        return {
+          ok: false as const,
+          message: error instanceof Error ? error.message : "スタッフ情報の保存に失敗しました。",
+        };
+      }
+    },
+    []
+  );
+
+  const flushStaffPersistForStaff = useCallback(
+    async (staffId: string): Promise<{ ok: true } | { ok: false; message: string }> => {
+      if (staffPersistTimers.current[staffId]) {
+        clearTimeout(staffPersistTimers.current[staffId]);
+        delete staffPersistTimers.current[staffId];
+      }
+      const merged = staffPersistPatches.current[staffId];
+      delete staffPersistPatches.current[staffId];
+      if (!merged) {
+        return { ok: true as const };
+      }
+      return applyStaffPersistPatch(staffId, merged);
+    },
+    [applyStaffPersistPatch]
+  );
 
   const flushStaffPersists = useCallback(async () => {
     const entries = Object.entries(staffPersistPatches.current);
-    for (const [staffId, timer] of Object.entries(staffPersistTimers.current)) {
+    for (const [, timer] of Object.entries(staffPersistTimers.current)) {
       clearTimeout(timer);
-      delete staffPersistTimers.current[staffId];
     }
+    staffPersistTimers.current = {};
     staffPersistPatches.current = {};
-    if (!usingSupabaseAuthRef.current || entries.length === 0) return;
+    if (entries.length === 0) return;
+    for (const [staffId, patch] of entries) {
+      const result = await applyStaffPersistPatch(staffId, patch);
+      if (!result.ok) {
+        console.error("staff_profiles flush failed", result.message);
+      }
+    }
+  }, [applyStaffPersistPatch]);
+
+  const refreshStaffFromSupabase = useCallback(async () => {
     try {
-      const supabase = createClient();
-      await Promise.all(
-        entries.map(async ([staffId, patch]) => {
-          const result = await persistStaffUpdate(supabase, staffId, patch);
-          if (!result.ok) {
-            console.error("staff_profiles update failed", result.message);
-          }
-        })
-      );
+      const remote = await reloadRemoteAppData();
+      setState((prev) => ({
+        ...prev,
+        staffList: remote.bootstrap?.staffList ?? [],
+        departments: remote.bootstrap?.departments?.length
+          ? remote.bootstrap.departments
+          : prev.departments,
+        currentUserId: remote.bootstrap?.userId ?? prev.currentUserId,
+        homeMessages: remote.homeMessages,
+      }));
     } catch (error) {
-      console.error("staff_profiles flush failed", error);
+      console.warn("refreshStaffFromSupabase failed", error);
     }
   }, []);
 
@@ -391,20 +569,9 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     let authSubscription: { unsubscribe: () => void } | null = null;
 
     async function applyAuthUser(userId: string | null) {
-      const local = loadState();
-      const localShiftSnapshot = buildShiftPersistenceSnapshot(local);
-
       if (!userId) {
-        usingSupabaseAuthRef.current = false;
         if (!cancelled) {
-          setUsingSupabaseAuth(false);
-          // 前ユーザーの表示が残らないようにスタッフ情報は捨てる
-          setState({
-            ...local,
-            staffList: [],
-            departments: local.departments ?? [],
-            currentUserId: "",
-          });
+          setState(createEmptyAppState());
           setReady(true);
         }
         return;
@@ -412,36 +579,31 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
       try {
         const supabase = createClient();
-        usingSupabaseAuthRef.current = true;
         if (!cancelled) {
-          setUsingSupabaseAuth(true);
           setReady(false);
         }
 
-        const bootstrap = await fetchStaffBootstrap(supabase);
+        const remote = await reloadRemoteAppData();
         if (cancelled) return;
 
-        const staffList = bootstrap?.staffList ?? [];
-        const remoteShiftSnapshot = await loadShiftSnapshotFromSupabase(supabase, localShiftSnapshot);
-        if (cancelled) return;
-        lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remoteShiftSnapshot);
+        lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remote.shiftSnapshot);
 
         setState({
-          ...local,
-          ...remoteShiftSnapshot,
-          staffList,
-          departments: bootstrap?.departments ?? [],
-          // Auth の user id を必ず正とする（前ユーザーの currentUserId を引きずらない）
-          currentUserId: userId,
+          staffList: remote.bootstrap?.staffList ?? [],
+          departments: remote.bootstrap?.departments ?? [],
+          currentUserId: remote.bootstrap?.userId ?? "",
+          homeMessages: remote.homeMessages,
+          ...remote.shiftSnapshot,
         });
       } catch (error) {
         console.warn("Supabase staff bootstrap skipped", error);
         if (!cancelled) {
           setState({
-            ...local,
             staffList: [],
             departments: [],
-            currentUserId: userId,
+            currentUserId: "",
+            homeMessages: [],
+            ...createEmptyShiftPersistenceFallback(),
           });
         }
       } finally {
@@ -458,14 +620,8 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         await applyAuthUser(user?.id ?? null);
 
         const { data } = supabase.auth.onAuthStateChange((event, session) => {
-          // 初回は getUser 側で処理済み。以降のログイン/ログアウトで必ず差し替える
           if (event === "INITIAL_SESSION") return;
-          if (
-            event === "SIGNED_IN" ||
-            event === "SIGNED_OUT" ||
-            event === "TOKEN_REFRESHED" ||
-            event === "USER_UPDATED"
-          ) {
+          if (event === "SIGNED_IN" || event === "SIGNED_OUT" || event === "USER_UPDATED") {
             void applyAuthUser(session?.user?.id ?? null);
           }
         });
@@ -473,8 +629,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       } catch (error) {
         console.warn("Supabase auth boot failed", error);
         if (!cancelled) {
-          setUsingSupabaseAuth(false);
-          setState(loadState());
+          setState(createEmptyAppState());
           setReady(true);
         }
       }
@@ -487,72 +642,84 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  useEffect(() => {
-    if (!ready) return;
-    // シフト等はローカル保存。Supabase 利用時はスタッフ/所属を localStorage に残さない
-    const toStore = usingSupabaseAuth
-      ? {
-          ...state,
-          staffList: [],
-          departments: [],
-        }
-      : state;
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(toStore));
-  }, [state, ready, usingSupabaseAuth]);
 
   useEffect(() => {
     latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(state);
   }, [state]);
 
-  useEffect(() => {
-    if (!ready || !usingSupabaseAuth) return;
-    if (!currentUserForSync) return;
+  const flushShiftPersist = useCallback(async (): Promise<{ ok: true } | { ok: false; message: string }> => {
+    const currentUser = state.staffList.find((staff) => staff.id === state.currentUserId);
+    if (!currentUser) return { ok: true };
+
+    if (shiftPersistDebounceRef.current) {
+      clearTimeout(shiftPersistDebounceRef.current);
+      shiftPersistDebounceRef.current = null;
+    }
+
     const snapshot = latestShiftSnapshotRef.current;
-    const signature = buildShiftPersistenceSignature(snapshot);
+    if (shiftPersistInFlightRef.current > 0) {
+      shiftPersistQueuedRef.current = true;
+      return { ok: true };
+    }
+
+    shiftPersistInFlightRef.current += 1;
+    try {
+      const result = await persistSnapshotViaApi(currentUser, snapshot);
+      if (!result.ok) return result;
+      lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(snapshot);
+      return { ok: true };
+    } finally {
+      finishShiftPersist(currentUser);
+    }
+  }, [state, finishShiftPersist, persistSnapshotViaApi]);
+
+  useEffect(() => {
+    if (!ready || !currentUserForSync) return;
+
+    const signature = buildShiftPersistenceSignature(latestShiftSnapshotRef.current);
     if (lastShiftPersistSignatureRef.current === signature) return;
-    lastShiftPersistSignatureRef.current = signature;
 
-    void (async () => {
-      try {
-        const supabase = createClient();
-        if (currentUserForSync.role === "worker") {
-          await persistWorkerDesiredShiftsToSupabase(supabase, snapshot, currentUserForSync.id);
-          return;
-        }
-        await persistShiftSnapshotToSupabase(supabase, snapshot);
-      } catch (error) {
-        console.warn("Shift snapshot persist skipped", error);
+    if (shiftPersistDebounceRef.current) {
+      clearTimeout(shiftPersistDebounceRef.current);
+    }
+
+    const debounceMs = currentUserForSync.role === "worker" ? 400 : 700;
+    shiftPersistDebounceRef.current = setTimeout(() => {
+      shiftPersistDebounceRef.current = null;
+      void runShiftPersist(currentUserForSync);
+    }, debounceMs);
+
+    return () => {
+      if (shiftPersistDebounceRef.current) {
+        clearTimeout(shiftPersistDebounceRef.current);
       }
-    })();
-  }, [ready, state, usingSupabaseAuth, currentUserForSync]);
-
-  useEffect(() => {
-    const onStorage = (event: StorageEvent) => {
-      if (event.key !== STORAGE_KEY) return;
-      if (usingSupabaseAuthRef.current) return;
-      const next = loadState();
-      setState(next);
     };
+  }, [ready, state, currentUserForSync, runShiftPersist]);
 
-    window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
-  }, []);
 
   useEffect(() => {
-    if (!ready || !usingSupabaseAuth) return;
+    if (!ready || !currentUserForSync) return;
     let cancelled = false;
     let supabase: ReturnType<typeof createClient> | null = null;
     let channel: any = null;
 
     const reloadShiftSnapshot = async () => {
-      if (!supabase || cancelled) return;
+      if (cancelled) return;
+      if (shiftPersistInFlightRef.current > 0) {
+        shiftReloadPendingRef.current = true;
+        return;
+      }
       try {
-        const next = await loadShiftSnapshotFromSupabase(supabase, latestShiftSnapshotRef.current);
-        if (cancelled) return;
+        const [next, homeMessages] = await Promise.all([
+          fetchShiftSnapshotFromApi(),
+          fetchHomeMessagesFromApi(),
+        ]);
+        if (!next || cancelled) return;
         lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(next);
         setState((prev) => ({
           ...prev,
           ...next,
+          homeMessages,
           staffList: prev.staffList,
           departments: prev.departments,
           currentUserId: prev.currentUserId,
@@ -562,17 +729,28 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       }
     };
 
+    const scheduleReloadShiftSnapshot = () => {
+      if (shiftReloadDebounceRef.current) {
+        clearTimeout(shiftReloadDebounceRef.current);
+      }
+      shiftReloadDebounceRef.current = setTimeout(() => {
+        shiftReloadDebounceRef.current = null;
+        void reloadShiftSnapshot();
+      }, 350);
+    };
+
     void (async () => {
       try {
         supabase = createClient();
         channel = supabase
           .channel("shift-state-sync")
-          .on("postgres_changes", { event: "*", schema: "public", table: "desired_shifts" }, reloadShiftSnapshot)
-          .on("postgres_changes", { event: "*", schema: "public", table: "confirmed_shifts" }, reloadShiftSnapshot)
-          .on("postgres_changes", { event: "*", schema: "public", table: "required_shifts" }, reloadShiftSnapshot)
-          .on("postgres_changes", { event: "*", schema: "public", table: "goal_block_slots" }, reloadShiftSnapshot)
-          .on("postgres_changes", { event: "*", schema: "public", table: "goal_memos" }, reloadShiftSnapshot)
-          .on("postgres_changes", { event: "*", schema: "public", table: "shift_periods" }, reloadShiftSnapshot);
+          .on("postgres_changes", { event: "*", schema: "public", table: "desired_shifts" }, scheduleReloadShiftSnapshot)
+          .on("postgres_changes", { event: "*", schema: "public", table: "confirmed_shifts" }, scheduleReloadShiftSnapshot)
+          .on("postgres_changes", { event: "*", schema: "public", table: "required_shifts" }, scheduleReloadShiftSnapshot)
+          .on("postgres_changes", { event: "*", schema: "public", table: "goal_block_slots" }, scheduleReloadShiftSnapshot)
+          .on("postgres_changes", { event: "*", schema: "public", table: "goal_memos" }, scheduleReloadShiftSnapshot)
+          .on("postgres_changes", { event: "*", schema: "public", table: "shift_periods" }, scheduleReloadShiftSnapshot)
+          .on("postgres_changes", { event: "*", schema: "public", table: "home_messages" }, scheduleReloadShiftSnapshot);
         channel.subscribe();
       } catch (error) {
         console.warn("Shift realtime subscription skipped", error);
@@ -581,11 +759,14 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
     return () => {
       cancelled = true;
+      if (shiftReloadDebounceRef.current) {
+        clearTimeout(shiftReloadDebounceRef.current);
+      }
       if (supabase && channel) {
         void supabase.removeChannel(channel);
       }
     };
-  }, [ready, usingSupabaseAuth]);
+  }, [ready, currentUserForSync]);
 
   useEffect(() => {
     const onHide = () => {
@@ -601,12 +782,8 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   }, [flushStaffPersists]);
 
   const currentUser = useMemo((): Staff | undefined => {
-    const matched = state.staffList.find((s) => s.id === state.currentUserId);
-    if (matched) return matched;
-    // Supabase ログイン中は別ユーザーへフォールバックしない（前の管理者名が残るのを防ぐ）
-    if (usingSupabaseAuth) return undefined;
-    return state.staffList[0];
-  }, [state.currentUserId, state.staffList, usingSupabaseAuth]);
+    return state.staffList.find((s) => s.id === state.currentUserId);
+  }, [state.currentUserId, state.staffList]);
 
   const isAdmin = currentUser?.role === "admin";
   const canManageMaster = Boolean(isAdmin && hasMasterPermission(currentUser?.adminPermission));
@@ -616,13 +793,6 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     [state.staffList]
   );
 
-  const setCurrentUserId = useCallback(
-    (id: string) => {
-      if (usingSupabaseAuth) return;
-      setState((prev) => ({ ...prev, currentUserId: id }));
-    },
-    [usingSupabaseAuth]
-  );
 
   const updatePeriod = useCallback((patch: Partial<ShiftPeriod>) => {
     setState((prev) => ({
@@ -776,15 +946,9 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         staffList: prev.staffList.map((staff) =>
           staff.id === staffId ? normalizeStaff({ ...staff, ...patch }) : staff
         ),
-        // Supabase 利用時は departments テーブルの内容だけを正とする（所属名の勝手な追加はしない）
-        departments:
-          !usingSupabaseAuthRef.current && patch.team && !prev.departments.includes(patch.team)
-            ? [...prev.departments, patch.team]
-            : prev.departments,
+        departments: prev.departments,
       };
     });
-
-    if (!usingSupabaseAuthRef.current) return;
 
     const { password: _password, salaryHistory: _salaryHistory, ...persistable } = patch;
     if (Object.keys(persistable).length === 0) return;
@@ -822,8 +986,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
           if (Object.keys(profilePatch).length === 0) return;
 
-          const supabase = createClient();
-          const result = await persistStaffUpdate(supabase, staffId, profilePatch);
+          const result = await persistStaffPatchViaApi(staffId, profilePatch);
           if (!result.ok) {
             console.error("staff_profiles update failed", result.message);
             window.alert(`スタッフ情報の保存に失敗しました: ${result.message}`);
@@ -836,6 +999,88 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     }, 300);
   }, []);
 
+  const saveStaffProfile = useCallback(
+    async (
+      staffId: string,
+      patch: Partial<StaffEditableFields>
+    ): Promise<{ ok: true } | { ok: false; message: string }> => {
+      const target = state.staffList.find((staff) => staff.id === staffId);
+      const actor = state.staffList.find((staff) => staff.id === state.currentUserId);
+      if (
+        target?.role === "admin" &&
+        actor?.role === "admin" &&
+        !canManageAdminAccounts(actor.adminPermission)
+      ) {
+        return { ok: false as const, message: "管理者アカウントの変更はマネージャーのみ可能です。" };
+      }
+      if (
+        (patch.role === "admin" || patch.adminPermission !== undefined) &&
+        actor?.role === "admin" &&
+        !canManageAdminAccounts(actor.adminPermission)
+      ) {
+        return { ok: false as const, message: "管理者権限の変更はマネージャーのみ可能です。" };
+      }
+
+      if (staffPersistTimers.current[staffId]) {
+        clearTimeout(staffPersistTimers.current[staffId]);
+        delete staffPersistTimers.current[staffId];
+      }
+      delete staffPersistPatches.current[staffId];
+
+      setState((prev) => ({
+        ...prev,
+        staffList: prev.staffList.map((staff) =>
+          staff.id === staffId ? normalizeStaff({ ...staff, ...patch }) : staff
+        ),
+      }));
+
+      const { password: _password, salaryHistory: _salaryHistory, ...persistable } = patch;
+      try {
+        const { email: nextEmail, ...profilePatch } = persistable;
+        if (typeof nextEmail === "string") {
+          const email = nextEmail.trim().toLowerCase();
+          if (email) {
+            const response = await fetch("/api/staff", {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: staffId, email }),
+            });
+            const payload = (await response.json()) as { ok: boolean; message?: string };
+            if (!payload.ok) {
+              return { ok: false as const, message: payload.message || "メールアドレスの更新に失敗しました。" };
+            }
+          }
+        }
+
+        if (Object.keys(profilePatch).length > 0) {
+          const result = await persistStaffPatchViaApi(staffId, profilePatch);
+          if (!result.ok) {
+            return result;
+          }
+        }
+
+        const supabase = createClient();
+        const bootstrap = await fetchStaffBootstrap(supabase);
+        if (bootstrap) {
+          setState((prev) => ({
+            ...prev,
+            staffList: bootstrap.staffList,
+            departments: bootstrap.departments.length > 0 ? bootstrap.departments : prev.departments,
+            currentUserId: bootstrap.userId,
+          }));
+        }
+
+        return { ok: true as const };
+      } catch (error) {
+        return {
+          ok: false as const,
+          message: error instanceof Error ? error.message : "スタッフ情報の保存に失敗しました。",
+        };
+      }
+    },
+    [state.currentUserId, state.staffList]
+  );
+
   const changeStaffPassword = useCallback(async (staffId: string, nextPassword: string) => {
     const password = nextPassword.trim();
     if (!password) {
@@ -847,7 +1092,9 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
     const target = state.staffList.find((staff) => staff.id === staffId);
     const actor = state.staffList.find((staff) => staff.id === state.currentUserId);
+    const isSelf = staffId === state.currentUserId;
     if (
+      !isSelf &&
       target?.role === "admin" &&
       actor?.role === "admin" &&
       !canManageAdminAccounts(actor.adminPermission)
@@ -855,16 +1102,25 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       return { ok: false as const, message: "管理者アカウントのパスワード変更はマネージャーのみ可能です。" };
     }
 
-    if (usingSupabaseAuthRef.current || (await detectSupabaseSession())) {
-      usingSupabaseAuthRef.current = true;
-      setUsingSupabaseAuth(true);
-      try {
+    try {
+        const flushResult = await flushStaffPersistForStaff(staffId);
+        if (!flushResult.ok) {
+          return flushResult;
+        }
+
         const response = await fetch("/api/staff", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: staffId, password }),
+          body: JSON.stringify({
+            id: staffId,
+            password,
+          }),
+          credentials: "same-origin",
         });
-        const payload = (await response.json()) as { ok: boolean; message?: string };
+        const payload = await readApiJson<{ ok: boolean; message?: string }>(
+          response,
+          "パスワードの更新に失敗しました。"
+        );
         if (!payload.ok) {
           return { ok: false as const, message: payload.message || "パスワードの更新に失敗しました。" };
         }
@@ -874,6 +1130,12 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
             staff.id === staffId ? normalizeStaff({ ...staff, password: "" }) : staff
           ),
         }));
+        if (isSelf) {
+          return {
+            ok: true as const,
+            message: "パスワードを更新しました。一度ログアウトし、新しいパスワードで再ログインしてください。",
+          };
+        }
         return { ok: true as const };
       } catch (error) {
         return {
@@ -881,16 +1143,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           message: error instanceof Error ? error.message : "パスワードの更新に失敗しました。",
         };
       }
-    }
-
-    setState((prev) => ({
-      ...prev,
-      staffList: prev.staffList.map((staff) =>
-        staff.id === staffId ? normalizeStaff({ ...staff, password }) : staff
-      ),
-    }));
-    return { ok: true as const };
-  }, [state.currentUserId, state.staffList]);
+  }, [flushStaffPersistForStaff, state.currentUserId, state.staffList]);
 
   const addSalaryRaise = useCallback(
     async (staffId: string, input: { effectiveDate: string; hourlyWage: number; note: string }) => {
@@ -903,65 +1156,26 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
       const note = input.note.trim();
 
-      if (usingSupabaseAuthRef.current || (await detectSupabaseSession())) {
-        usingSupabaseAuthRef.current = true;
-        setUsingSupabaseAuth(true);
-        try {
-          const supabase = createClient();
-          const result = await persistSalaryRaise(supabase, staffId, {
-            effectiveDate,
-            hourlyWage,
-            note,
-          });
-          if (!result.ok) {
-            return { ok: false as const, message: result.message };
-          }
-          const entry: SalaryRaise = {
-            id: result.id,
-            effectiveDate,
-            hourlyWage,
-            note,
-          };
-          setState((prev) => ({
-            ...prev,
-            staffList: prev.staffList.map((staff) => {
-              if (staff.id !== staffId) return staff;
-              return normalizeStaff({
-                ...staff,
-                hourlyWage,
-                salaryHistory: [entry, ...(staff.salaryHistory ?? [])],
-              });
-            }),
-          }));
-          return { ok: true as const };
-        } catch (error) {
-          return {
-            ok: false as const,
-            message: error instanceof Error ? error.message : "昇給の保存に失敗しました。",
-          };
+      try {
+        const response = await fetch("/api/staff/salary-raises", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ staffId, effectiveDate, hourlyWage, note }),
+        });
+        const payload = (await response.json()) as { ok: boolean; id?: string; message?: string };
+        if (!payload.ok || !payload.id) {
+          return { ok: false as const, message: payload.message || "昇給の保存に失敗しました。" };
         }
+        await refreshStaffFromSupabase();
+        return { ok: true as const };
+      } catch (error) {
+        return {
+          ok: false as const,
+          message: error instanceof Error ? error.message : "昇給の保存に失敗しました。",
+        };
       }
-
-      const entry: SalaryRaise = {
-        id: `raise-${staffId}-${Date.now()}`,
-        effectiveDate,
-        hourlyWage,
-        note,
-      };
-      setState((prev) => ({
-        ...prev,
-        staffList: prev.staffList.map((staff) => {
-          if (staff.id !== staffId) return staff;
-          return normalizeStaff({
-            ...staff,
-            hourlyWage,
-            salaryHistory: [entry, ...(staff.salaryHistory ?? [])],
-          });
-        }),
-      }));
-      return { ok: true as const };
     },
-    []
+    [refreshStaffFromSupabase]
   );
 
   const updateSalaryRaise = useCallback(
@@ -978,76 +1192,26 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       }
       const note = input.note.trim();
 
-      if (usingSupabaseAuthRef.current || (await detectSupabaseSession())) {
-        usingSupabaseAuthRef.current = true;
-        setUsingSupabaseAuth(true);
-        try {
-          const supabase = createClient();
-          const result = await persistSalaryRaiseUpdate(supabase, staffId, raiseId, {
-            effectiveDate,
-            hourlyWage,
-            note,
-          });
-          if (!result.ok) {
-            return { ok: false as const, message: result.message };
-          }
-          setState((prev) => ({
-            ...prev,
-            staffList: prev.staffList.map((staff) => {
-              if (staff.id !== staffId) return staff;
-              const isSynthetic = raiseId.startsWith("initial-");
-              const nextHistory = isSynthetic
-                ? [
-                    { id: result.id, effectiveDate, hourlyWage, note },
-                    ...(staff.salaryHistory ?? []).filter((entry) => entry.id !== raiseId),
-                  ]
-                : (staff.salaryHistory ?? []).map((entry) =>
-                    entry.id === raiseId ? { ...entry, effectiveDate, hourlyWage, note } : entry
-                  );
-              const latest = [...nextHistory].sort((a, b) =>
-                b.effectiveDate.localeCompare(a.effectiveDate)
-              )[0];
-              return normalizeStaff({
-                ...staff,
-                hourlyWage: latest?.hourlyWage ?? hourlyWage,
-                salaryHistory: nextHistory,
-              });
-            }),
-          }));
-          return { ok: true as const };
-        } catch (error) {
-          return {
-            ok: false as const,
-            message: error instanceof Error ? error.message : "昇給履歴の更新に失敗しました。",
-          };
+      try {
+        const response = await fetch("/api/staff/salary-raises", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ staffId, raiseId, effectiveDate, hourlyWage, note }),
+        });
+        const payload = (await response.json()) as { ok: boolean; message?: string };
+        if (!payload.ok) {
+          return { ok: false as const, message: payload.message || "昇給履歴の更新に失敗しました。" };
         }
+        await refreshStaffFromSupabase();
+        return { ok: true as const };
+      } catch (error) {
+        return {
+          ok: false as const,
+          message: error instanceof Error ? error.message : "昇給履歴の更新に失敗しました。",
+        };
       }
-
-      setState((prev) => ({
-        ...prev,
-        staffList: prev.staffList.map((staff) => {
-          if (staff.id !== staffId) return staff;
-          const isSynthetic = raiseId.startsWith("initial-");
-          const nextId = isSynthetic ? `raise-${staffId}-${Date.now()}` : raiseId;
-          const nextHistory = isSynthetic
-            ? [
-                { id: nextId, effectiveDate, hourlyWage, note },
-                ...(staff.salaryHistory ?? []).filter((entry) => entry.id !== raiseId),
-              ]
-            : (staff.salaryHistory ?? []).map((entry) =>
-                entry.id === raiseId ? { ...entry, effectiveDate, hourlyWage, note } : entry
-              );
-          const latest = [...nextHistory].sort((a, b) => b.effectiveDate.localeCompare(a.effectiveDate))[0];
-          return normalizeStaff({
-            ...staff,
-            hourlyWage: latest?.hourlyWage ?? hourlyWage,
-            salaryHistory: nextHistory,
-          });
-        }),
-      }));
-      return { ok: true as const };
     },
-    []
+    [refreshStaffFromSupabase]
   );
 
   const addDepartment = useCallback(async (name: string) => {
@@ -1057,10 +1221,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       return { ok: false as const, message: `${trimmed}は固定の所属です` };
     }
 
-    if (usingSupabaseAuthRef.current || (await detectSupabaseSession())) {
-      usingSupabaseAuthRef.current = true;
-      setUsingSupabaseAuth(true);
-      try {
+    try {
         const response = await fetch("/api/departments", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1070,19 +1231,15 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         if (!payload.ok) {
           return { ok: false as const, message: payload.message || "所属の追加に失敗しました。" };
         }
+        await refreshStaffFromSupabase();
+        return { ok: true as const };
       } catch (error) {
         return {
           ok: false as const,
           message: error instanceof Error ? error.message : "所属の追加に失敗しました。",
         };
       }
-    }
-
-    setState((prev) =>
-      prev.departments.includes(trimmed) ? prev : { ...prev, departments: [...prev.departments, trimmed] }
-    );
-    return { ok: true as const };
-  }, []);
+  }, [refreshStaffFromSupabase]);
 
   const updateDepartment = useCallback(async (oldName: string, nextName: string) => {
     if (isFixedDepartmentName(oldName)) {
@@ -1095,10 +1252,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     }
     if (oldName === trimmed) return { ok: true as const };
 
-    if (usingSupabaseAuthRef.current || (await detectSupabaseSession())) {
-      usingSupabaseAuthRef.current = true;
-      setUsingSupabaseAuth(true);
-      try {
+    try {
         const response = await fetch("/api/departments", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
@@ -1108,41 +1262,27 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         if (!payload.ok) {
           return { ok: false as const, message: payload.message || "所属名の変更に失敗しました。" };
         }
+        await refreshStaffFromSupabase();
+        const remote = await fetchShiftSnapshotFromApi();
+        if (remote) {
+          lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remote);
+          setState((prev) => ({ ...prev, ...remote }));
+        }
+        return { ok: true as const };
       } catch (error) {
         return {
           ok: false as const,
           message: error instanceof Error ? error.message : "所属名の変更に失敗しました。",
         };
       }
-    }
-
-    setState((prev) => ({
-      ...prev,
-      staffList: prev.staffList.map((staff) => (staff.team === oldName ? { ...staff, team: trimmed } : staff)),
-      departments: prev.departments.map((department) => (department === oldName ? trimmed : department)),
-      goalBlocksByDate: Object.fromEntries(
-        Object.entries(prev.goalBlocksByDate).map(([date, blocks]) => [
-          date,
-          normalizeGoalBlocks(
-            normalizeGoalBlocks(blocks).map((slots) =>
-              slots.map((department) => (department === oldName ? trimmed : department))
-            )
-          ),
-        ])
-      ) as AppState["goalBlocksByDate"],
-    }));
-    return { ok: true as const };
-  }, []);
+  }, [refreshStaffFromSupabase]);
 
   const deleteDepartment = useCallback(async (name: string) => {
     if (isFixedDepartmentName(name)) {
       return { ok: false as const, message: `${name}は削除できません` };
     }
 
-    if (usingSupabaseAuthRef.current || (await detectSupabaseSession())) {
-      usingSupabaseAuthRef.current = true;
-      setUsingSupabaseAuth(true);
-      try {
+    try {
         const response = await fetch("/api/departments", {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
@@ -1152,30 +1292,20 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         if (!payload.ok) {
           return { ok: false as const, message: payload.message || "所属の削除に失敗しました。" };
         }
+        await refreshStaffFromSupabase();
+        const remote = await fetchShiftSnapshotFromApi();
+        if (remote) {
+          lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remote);
+          setState((prev) => ({ ...prev, ...remote }));
+        }
+        return { ok: true as const };
       } catch (error) {
         return {
           ok: false as const,
           message: error instanceof Error ? error.message : "所属の削除に失敗しました。",
         };
       }
-    }
-
-    setState((prev) => ({
-      ...prev,
-      departments: prev.departments.filter((department) => department !== name),
-      goalBlocksByDate: Object.fromEntries(
-        Object.entries(prev.goalBlocksByDate).map(([date, blocks]) => [
-          date,
-          normalizeGoalBlocks(
-            normalizeGoalBlocks(blocks).map((slots) =>
-              slots.map((department) => (department === name ? DEFAULT_GOAL_DEPARTMENT : department))
-            )
-          ),
-        ])
-      ) as AppState["goalBlocksByDate"],
-    }));
-    return { ok: true as const };
-  }, []);
+  }, [refreshStaffFromSupabase]);
 
   const createStaff = useCallback(async (input: StaffEditableFields) => {
     const email = (input.email ?? "").trim().toLowerCase();
@@ -1190,6 +1320,9 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     if (input.role === "admin" && !canManageAdminAccounts(actor?.adminPermission)) {
       return { ok: false as const, message: "管理者アカウントの作成はマネージャーのみ可能です。" };
     }
+    if (input.password.trim().length < 6) {
+      return { ok: false as const, message: "パスワードは6文字以上にしてください。" };
+    }
     if (input.role === "admin" && !(input.managedTeams?.length > 0)) {
       return { ok: false as const, message: "管理者には操作できる所属を1つ以上選択してください。" };
     }
@@ -1197,14 +1330,11 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       return { ok: false as const, message: "所属は必須です。" };
     }
 
-    const loggedIn = usingSupabaseAuthRef.current || (await detectSupabaseSession());
-    if (loggedIn) {
-      usingSupabaseAuthRef.current = true;
-      setUsingSupabaseAuth(true);
-      try {
+    try {
         const response = await fetch("/api/staff", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
           body: JSON.stringify({
             name: input.name,
             firstName: input.firstName,
@@ -1227,7 +1357,10 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
             note: input.note ?? "",
           }),
         });
-        const payload = (await response.json()) as { ok: boolean; id?: string; message?: string };
+        const payload = await readApiJson<{ ok: boolean; id?: string; message?: string }>(
+          response,
+          "スタッフ作成に失敗しました。"
+        );
         if (!payload.ok || !payload.id) {
           return { ok: false as const, message: payload.message || "スタッフ作成に失敗しました。" };
         }
@@ -1248,69 +1381,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           message: error instanceof Error ? error.message : "スタッフ作成に失敗しました。",
         };
       }
-    }
-
-    const id = `staff-${Date.now()}`;
-    const hireDate = input.hireDate ?? "";
-    const contractStartDate = input.contractStartDate ?? "";
-    const hourlyWage = Number.isFinite(input.hourlyWage) ? input.hourlyWage : 0;
-    const initialEffectiveDate = hireDate || contractStartDate || toDateKey(new Date());
-    const salaryHistory =
-      input.salaryHistory && input.salaryHistory.length > 0
-        ? input.salaryHistory
-        : hourlyWage > 0
-          ? [
-              {
-                id: `raise-${id}-init`,
-                effectiveDate: initialEffectiveDate,
-                hourlyWage,
-                note: "初任給",
-              },
-            ]
-          : [];
-    setState((prev) => ({
-      ...prev,
-      staffList: [
-        ...prev.staffList,
-        normalizeStaff({
-          id,
-          ...input,
-          email,
-          managedTeams: input.role === "admin" ? input.managedTeams ?? [] : [],
-          adminPermission: normalizeAdminPermission(input.role, input.adminPermission),
-          team: input.role === "admin" ? input.managedTeams?.[0] ?? input.team ?? "" : input.team,
-          hireDate,
-          contractStartDate,
-          contractEndDate: input.contractEndDate ?? "",
-          contractRenewalMonths: input.contractRenewalMonths ?? DEFAULT_CONTRACT_RENEWAL_MONTHS,
-          hourlyWage,
-          socialInsurance: Boolean(input.socialInsurance),
-          googleEmail: input.googleEmail ?? "",
-          note: input.note ?? "",
-          salaryHistory,
-        }),
-      ],
-      departments: prev.departments.includes(input.team) ? prev.departments : [...prev.departments, input.team],
-    }));
-    return { ok: true as const, id };
-  }, [currentUser]);
-
-  const refreshStaffFromSupabase = useCallback(async () => {
-    if (!usingSupabaseAuth) return;
-    try {
-      const supabase = createClient();
-      const bootstrap = await fetchStaffBootstrap(supabase);
-      if (!bootstrap) return;
-      setState((prev) => ({
-        ...prev,
-        staffList: bootstrap.staffList,
-        departments: bootstrap.departments.length > 0 ? bootstrap.departments : prev.departments,
-        currentUserId: bootstrap.userId,
-      }));
-    } catch (error) {
-      console.warn("refreshStaffFromSupabase failed", error);
-    }
-  }, [usingSupabaseAuth]);
+  }, [currentUser, refreshStaffFromSupabase]);
 
   const deleteStaff = useCallback(async (staffId: string) => {
     const target = state.staffList.find((staff) => staff.id === staffId);
@@ -1318,37 +1389,30 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       return { ok: false as const, message: "管理者アカウントの削除はマネージャーのみ可能です。" };
     }
 
-    if (usingSupabaseAuthRef.current || (await detectSupabaseSession())) {
-      usingSupabaseAuthRef.current = true;
-      setUsingSupabaseAuth(true);
-      try {
-        const supabase = createClient();
-        const result = await persistStaffDelete(supabase, staffId);
-        if (!result.ok) {
-          return { ok: false as const, message: result.message };
+    try {
+        const response = await fetch("/api/staff", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: staffId }),
+        });
+        const payload = (await response.json()) as { ok: boolean; message?: string };
+        if (!payload.ok) {
+          return { ok: false as const, message: payload.message || "スタッフの削除に失敗しました。" };
         }
+        await refreshStaffFromSupabase();
+        const remote = await fetchShiftSnapshotFromApi();
+        if (remote) {
+          lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remote);
+          setState((prev) => ({ ...prev, ...remote }));
+        }
+        return { ok: true as const };
       } catch (error) {
         return {
           ok: false as const,
           message: error instanceof Error ? error.message : "スタッフの削除に失敗しました。",
         };
       }
-    }
-
-    setState((prev) => {
-      const nextStaffList = prev.staffList.filter((staff) => staff.id !== staffId);
-      const nextCurrentUserId =
-        prev.currentUserId === staffId ? nextStaffList[0]?.id ?? prev.currentUserId : prev.currentUserId;
-      return {
-        ...prev,
-        currentUserId: nextCurrentUserId,
-        staffList: nextStaffList,
-        desiredShifts: prev.desiredShifts.filter((shift) => shift.staffId !== staffId),
-        confirmedShifts: prev.confirmedShifts.filter((shift) => shift.staffId !== staffId),
-      };
-    });
-    return { ok: true as const };
-  }, [currentUser, state.staffList]);
+  }, [currentUser, refreshStaffFromSupabase]);
 
   const upsertDesiredShift = useCallback(
     (input: WishInput) => {
@@ -1367,30 +1431,33 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           (s) =>
             s.staffId === prev.currentUserId &&
             s.date === input.date &&
-            isAttendanceStatus(s.status)
+            Boolean(s.publishedAt)
         );
-        const shouldMarkAdjusting = Boolean(confirmedShift);
 
         if (existing) {
-          return {
+          const updatedDesired: DesiredShift = {
+            ...existing,
+            startTime: input.startTime,
+            endTime: input.endTime,
+            breakMinutes,
+            actualMinutes,
+            note: input.note,
+            updatedAt: now,
+          };
+          const shouldMarkAdjusting = hasWishChangedAfterPublish(confirmedShift, updatedDesired);
+          const nextState = {
             ...prev,
-            desiredShifts: prev.desiredShifts.map((s) =>
-              s.id === existing.id
-                ? {
-                    ...s,
-                    startTime: input.startTime,
-                    endTime: input.endTime,
-                    breakMinutes,
-                    actualMinutes,
-                    note: input.note,
-                    updatedAt: now,
-                  }
-                : s
-            ),
-            confirmedShifts: shouldMarkAdjusting
+            desiredShifts: prev.desiredShifts.map((s) => (s.id === existing.id ? updatedDesired : s)),
+            confirmedShifts: confirmedShift
               ? prev.confirmedShifts.map((s) =>
-                  s.id === confirmedShift!.id
-                    ? { ...s, status: "adjusting" as const, updatedAt: now }
+                  s.id === confirmedShift.id
+                    ? shouldMarkAdjusting
+                      ? { ...s, status: "adjusting" as const, updatedAt: now }
+                      : {
+                          ...s,
+                          status: (isAttendanceStatus(s.status) ? s.status : "confirmed") as ConfirmedShift["status"],
+                          updatedAt: s.publishedAt ?? s.updatedAt,
+                        }
                     : s
                 )
               : prev.confirmedShifts,
@@ -1398,6 +1465,8 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
               ? { ...prev.period, adjustmentStatus: "adjusting" as const, updatedAt: now }
               : prev.period,
           };
+          latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(nextState);
+          return nextState;
         }
         const created: DesiredShift = {
           id: `wish-${prev.currentUserId}-${input.date}`,
@@ -1412,13 +1481,20 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           createdAt: now,
           updatedAt: now,
         };
-        return {
+        const shouldMarkAdjusting = hasWishChangedAfterPublish(confirmedShift, created);
+        const nextState = {
           ...prev,
           desiredShifts: [...prev.desiredShifts, created],
-          confirmedShifts: shouldMarkAdjusting
+          confirmedShifts: confirmedShift
             ? prev.confirmedShifts.map((s) =>
-                s.id === confirmedShift!.id
-                  ? { ...s, status: "adjusting" as const, updatedAt: now }
+                s.id === confirmedShift.id
+                  ? shouldMarkAdjusting
+                    ? { ...s, status: "adjusting" as const, updatedAt: now }
+                    : {
+                        ...s,
+                        status: (isAttendanceStatus(s.status) ? s.status : "confirmed") as ConfirmedShift["status"],
+                        updatedAt: s.publishedAt ?? s.updatedAt,
+                      }
                   : s
               )
             : prev.confirmedShifts,
@@ -1426,6 +1502,8 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
             ? { ...prev.period, adjustmentStatus: "adjusting" as const, updatedAt: now }
             : prev.period,
         };
+        latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(nextState);
+        return nextState;
       });
 
       return { ok: true as const };
@@ -1441,24 +1519,33 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           (s) =>
             s.staffId === prev.currentUserId &&
             s.date === date &&
-            isAttendanceStatus(s.status)
+            Boolean(s.publishedAt)
         );
-        return {
+        const nextState = {
           ...prev,
           desiredShifts: prev.desiredShifts.filter(
             (s) => !(s.staffId === prev.currentUserId && s.date === date)
           ),
-          confirmedShifts: confirmedShift
-            ? prev.confirmedShifts.map((s) =>
-                s.id === confirmedShift.id
-                  ? { ...s, status: "adjusting" as const, updatedAt: now }
-                  : s
-              )
-            : prev.confirmedShifts,
+          confirmedShifts: prev.confirmedShifts
+            .filter(
+              (s) =>
+                !(
+                  s.staffId === prev.currentUserId &&
+                  s.date === date &&
+                  !s.publishedAt
+                )
+            )
+            .map((s) =>
+              confirmedShift && s.id === confirmedShift.id
+                ? { ...s, status: "adjusting" as const, updatedAt: now }
+                : s
+            ),
           period: confirmedShift
             ? { ...prev.period, adjustmentStatus: "adjusting" as const, updatedAt: now }
             : prev.period,
         };
+        latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(nextState);
+        return nextState;
       });
       return { ok: true as const };
     },
@@ -1482,7 +1569,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       );
       const shouldMarkAdjusting = existingConfirmed ? isAttendanceStatus(existingConfirmed.status) : false;
 
-      return {
+      const nextState = {
         ...prev,
         desiredShifts: prev.desiredShifts.map((s) =>
           s.id === desiredId
@@ -1510,9 +1597,11 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
             : s
         ),
         period: shouldMarkAdjusting || existingConfirmed
-          ? { ...prev.period, adjustmentStatus: "adjusting", updatedAt: now }
+          ? { ...prev.period, adjustmentStatus: "adjusting" as const, updatedAt: now }
           : prev.period,
       };
+      latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(nextState);
+      return nextState;
     });
 
     return { ok: true as const };
@@ -1529,18 +1618,39 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
       if (status === "adjusting") {
         if (existing) {
-          return {
+          const nextState = {
             ...prev,
             confirmedShifts: prev.confirmedShifts.map((s) =>
               s.id === existing.id ? { ...s, status: "adjusting" as const, updatedAt: now } : s
             ),
-            period: { ...prev.period, adjustmentStatus: "adjusting", updatedAt: now },
+            period: { ...prev.period, adjustmentStatus: "adjusting" as const, updatedAt: now },
           };
+          latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(nextState);
+          return nextState;
         }
-        return {
-          ...prev,
-          period: { ...prev.period, adjustmentStatus: "adjusting", updatedAt: now },
+        const created: ConfirmedShift = {
+          id: `confirm-${desired.staffId}-${desired.date}`,
+          staffId: desired.staffId,
+          periodId: desired.periodId,
+          date: desired.date,
+          status: "adjusting",
+          startTime: desired.startTime,
+          endTime: desired.endTime,
+          breakMinutes: desired.breakMinutes,
+          actualMinutes: desired.actualMinutes,
+          note: desired.note,
+          adminNote: "",
+          publishedAt: null,
+          createdAt: now,
+          updatedAt: now,
         };
+        const nextState = {
+          ...prev,
+          confirmedShifts: [...prev.confirmedShifts, created],
+          period: { ...prev.period, adjustmentStatus: "adjusting" as const, updatedAt: now },
+        };
+        latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(nextState);
+        return nextState;
       }
 
       if (existing) {
@@ -1557,13 +1667,15 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
                 updatedAt: now,
               }
             : { ...existing, status, updatedAt: now };
-        return {
+        const nextState = {
           ...prev,
           confirmedShifts: prev.confirmedShifts.map((s) =>
             s.id === existing.id ? updatedConfirmed : s
           ),
-          period: { ...prev.period, adjustmentStatus: "adjusting", updatedAt: now },
+          period: { ...prev.period, adjustmentStatus: "adjusting" as const, updatedAt: now },
         };
+        latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(nextState);
+        return nextState;
       }
 
       const created: ConfirmedShift = {
@@ -1583,11 +1695,13 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         updatedAt: now,
       };
 
-      return {
+      const nextState = {
         ...prev,
         confirmedShifts: [...prev.confirmedShifts, created],
-        period: { ...prev.period, adjustmentStatus: "adjusting", updatedAt: now },
+        period: { ...prev.period, adjustmentStatus: "adjusting" as const, updatedAt: now },
       };
+      latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(nextState);
+      return nextState;
     });
   }, []);
 
@@ -1601,28 +1715,32 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       patch: Partial<Pick<ConfirmedShift, "startTime" | "endTime" | "adminNote" | "note" | "status">>
     ) => {
       const now = nowIso();
-      setState((prev) => ({
-        ...prev,
-        confirmedShifts: prev.confirmedShifts.map((s) => {
-          if (s.id !== id) return s;
-          const startTime = patch.startTime ?? s.startTime;
-          const endTime = patch.endTime ?? s.endTime;
-          const breakMinutes = calcBreakMinutes(startTime, endTime);
-          return {
-            ...s,
-            ...patch,
-            status: (patch.status ?? s.status) as ConfirmedShift["status"],
-            startTime,
-            endTime,
-            breakMinutes,
-            actualMinutes: calcActualMinutes(startTime, endTime, breakMinutes),
-            updatedAt: now,
-          };
-        }),
-        period: patch.status
-          ? { ...prev.period, adjustmentStatus: "adjusting", updatedAt: now }
-          : prev.period,
-      }));
+      setState((prev) => {
+        const nextState = {
+          ...prev,
+          confirmedShifts: prev.confirmedShifts.map((s) => {
+            if (s.id !== id) return s;
+            const startTime = patch.startTime ?? s.startTime;
+            const endTime = patch.endTime ?? s.endTime;
+            const breakMinutes = calcBreakMinutes(startTime, endTime);
+            return {
+              ...s,
+              ...patch,
+              status: (patch.status ?? s.status) as ConfirmedShift["status"],
+              startTime,
+              endTime,
+              breakMinutes,
+              actualMinutes: calcActualMinutes(startTime, endTime, breakMinutes),
+              updatedAt: now,
+            };
+          }),
+          period: patch.status
+            ? { ...prev.period, adjustmentStatus: "adjusting" as const, updatedAt: now }
+            : prev.period,
+        };
+        latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(nextState);
+        return nextState;
+      });
     },
     []
   );
@@ -1649,16 +1767,23 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           const desired = prev.desiredShifts.find((shift) => shift.staffId === staff.id && shift.date === dateKey);
           const existing = nextConfirmedMap.get(`${staff.id}-${dateKey}`);
           const nextStatus: ConfirmedShift["status"] = desired
-            ? existing && isAttendanceStatus(existing.status)
-              ? existing.status
+            ? existing
+              ? existing.status === "unconfirmed" || isAttendanceStatus(existing.status)
+                ? existing.status
+                : "confirmed"
               : "confirmed"
             : "unconfirmed";
+          const fallbackStart = desired?.startTime ?? existing?.startTime ?? "09:00";
+          const fallbackEnd =
+            desired?.endTime ??
+            existing?.endTime ??
+            (nextStatus === "unconfirmed" ? "09:01" : "18:00");
           const nextShift: ConfirmedShift = existing
             ? {
                 ...existing,
                 status: nextStatus,
-                startTime: desired?.startTime ?? existing.startTime ?? "00:00",
-                endTime: desired?.endTime ?? existing.endTime ?? "00:00",
+                startTime: fallbackStart,
+                endTime: fallbackEnd,
                 breakMinutes: desired?.breakMinutes ?? 0,
                 actualMinutes: desired?.actualMinutes ?? 0,
                 note: desired?.note ?? existing.note ?? "",
@@ -1671,8 +1796,8 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
                 periodId: prev.period.id,
                 date: dateKey,
                 status: nextStatus,
-                startTime: desired?.startTime ?? "00:00",
-                endTime: desired?.endTime ?? "00:00",
+                startTime: fallbackStart,
+                endTime: fallbackEnd,
                 breakMinutes: desired?.breakMinutes ?? 0,
                 actualMinutes: desired?.actualMinutes ?? 0,
                 note: desired?.note ?? "",
@@ -1685,17 +1810,19 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      return {
+      const nextState = {
         ...prev,
         confirmedShifts: Array.from(nextConfirmedMap.values()),
         period: {
           ...prev.period,
           publishedWeekStartDate: mode === "week" ? date ?? prev.period.publishedWeekStartDate : prev.period.publishedWeekStartDate,
           publishedAt: mode === "week" ? now : prev.period.publishedAt,
-          adjustmentStatus: "published",
+          adjustmentStatus: "published" as const,
           updatedAt: now,
         },
       };
+      latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(nextState);
+      return nextState;
     });
   }, []);
 
@@ -1760,58 +1887,63 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const createHomeMessage = useCallback(
-    (input: { body: string; audience: "all" | "team"; team?: string }) => {
+    async (input: { body: string; audience: "all" | "team"; team?: string }) => {
       if (!canManageMaster) {
         return { ok: false as const, message: "メッセージの送信はマネージャーまたはアルバイト管理者のみ可能です。" };
       }
-      const body = input.body.trim();
-      if (!body) return { ok: false as const, message: "メッセージを入力してください。" };
-      if (input.audience === "team" && !input.team?.trim()) {
-        return { ok: false as const, message: "所属を選択してください。" };
-      }
-      setState((prev) => {
-        const message: HomeMessage = {
-          id: `msg-${Date.now()}`,
-          body,
-          createdAt: nowIso(),
-          createdByStaffId: prev.currentUserId,
-          audience: input.audience,
-          team: input.audience === "team" ? input.team!.trim() : "",
+
+      try {
+        const response = await fetch("/api/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+        });
+        const payload = (await response.json()) as { ok: boolean; message?: string };
+        if (!payload.ok) {
+          return { ok: false as const, message: payload.message || "メッセージの送信に失敗しました。" };
+        }
+        const homeMessages = await fetchHomeMessagesFromApi();
+        setState((prev) => ({ ...prev, homeMessages }));
+        return { ok: true as const };
+      } catch (error) {
+        return {
+          ok: false as const,
+          message: error instanceof Error ? error.message : "メッセージの送信に失敗しました。",
         };
-        return { ...prev, homeMessages: [message, ...(prev.homeMessages ?? [])] };
-      });
-      return { ok: true as const };
+      }
     },
     [canManageMaster]
   );
 
   const deleteHomeMessage = useCallback(
-    (messageId: string) => {
+    async (messageId: string) => {
       if (!canManageMaster) return;
-      setState((prev) => ({
-        ...prev,
-        homeMessages: (prev.homeMessages ?? []).filter((m) => m.id !== messageId),
-      }));
+
+      try {
+        const response = await fetch("/api/messages", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: messageId }),
+        });
+        if (!response.ok) return;
+        const homeMessages = await fetchHomeMessagesFromApi();
+        setState((prev) => ({ ...prev, homeMessages }));
+      } catch (error) {
+        console.warn("deleteHomeMessage failed", error);
+      }
     },
     [canManageMaster]
   );
 
-  const resetDemoData = useCallback(() => {
-    const next = createInitialState();
-    setState(next);
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  }, []);
 
   const value: ShiftContextValue = {
     ready,
-    usingSupabaseAuth,
     state,
     currentUser,
     isAdmin,
     canManageMaster,
     canManageAdminAccounts: canManageAdmins,
     workers,
-    setCurrentUserId,
     updatePeriod,
     updateGoalBlockCount,
     updateGoalBlockDepartment,
@@ -1820,7 +1952,9 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     upsertGoalMemo,
     deleteGoalMemo,
     updateStaff,
+    saveStaffProfile,
     changeStaffPassword,
+    flushStaffPersistForStaff,
     createStaff,
     refreshStaffFromSupabase,
     addSalaryRaise,
@@ -1831,6 +1965,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     deleteDepartment,
     upsertDesiredShift,
     deleteDesiredShift,
+    flushShiftPersist,
     addConfirmedFromDesired,
     setDesiredShiftStatus,
     updateDesiredShiftTimes,
@@ -1841,7 +1976,6 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     upsertRequired,
     createHomeMessage,
     deleteHomeMessage,
-    resetDemoData,
   };
 
   return <ShiftContext.Provider value={value}>{children}</ShiftContext.Provider>;

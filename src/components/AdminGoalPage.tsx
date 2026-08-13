@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { Icons } from "@/components/icons";
-import { useShift } from "@/context/ShiftContext";
+import { useShift } from "@/components/context/ShiftContext";
 import { listOperableDepartmentNames } from "@/lib/shift/adminDepartments";
 import { formatDateLong, formatDateShort, toDateKeyJst } from "@/lib/shift/dates";
 import {

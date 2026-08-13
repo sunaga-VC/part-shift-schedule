@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { AppFrame } from "@/components/AppFrame";
-import { ShiftProvider } from "@/context/ShiftContext";
+import { ShiftProvider } from "@/components/context/ShiftContext";
 import "./globals.css";
 
 export const metadata: Metadata = {

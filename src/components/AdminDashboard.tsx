@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { DaySummaryGantt } from "@/components/DaySummaryGantt";
 import { Icons } from "@/components/icons";
-import { useShift } from "@/context/ShiftContext";
+import { useShift } from "@/components/context/ShiftContext";
 import {
   addDays,
   addMonthsToDateKey,

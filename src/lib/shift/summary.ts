@@ -4,7 +4,6 @@ import {
   getGoalBlocksForDate,
   GOAL_SLOT_MINUTES,
 } from "./goal";
-import { isAttendanceStatus } from "./status";
 import type {
   AppState,
   ConfirmedShift,
@@ -82,7 +81,7 @@ export function buildDaySummaries(
     .sort()
     .map((date) => {
       const desiredForDay = desiredShifts.filter((s) => s.date === date);
-      const confirmedForDay = confirmedShifts.filter((s) => s.date === date && isAttendanceStatus(s.status));
+      const confirmedForDay = confirmedShifts.filter((s) => s.date === date && Boolean(s.publishedAt));
       const { requiredPeople, requiredMinutes } = getRequiredMinutesForDate(
         date,
         requiredShifts,
@@ -121,7 +120,7 @@ export function buildWeeklyStaffSummary(
         .filter((s) => s.staffId === staff.id)
         .reduce((t, s) => t + s.actualMinutes, 0);
       const confirmedMinutes = confirmedShifts
-        .filter((s) => s.staffId === staff.id && isAttendanceStatus(s.status))
+        .filter((s) => s.staffId === staff.id && Boolean(s.publishedAt))
         .reduce((t, s) => t + s.actualMinutes, 0);
       const contractMinutes = staff.weeklyContractHours * 60 * contractWeeks;
 
@@ -161,7 +160,7 @@ export function buildDashboardStats(
 
   const desiredMinutes = desiredShifts.reduce((t, s) => t + s.actualMinutes, 0);
   const confirmedMinutes = confirmedShifts
-    .filter((s) => isAttendanceStatus(s.status))
+    .filter((s) => Boolean(s.publishedAt))
     .reduce((t, s) => t + s.actualMinutes, 0);
   const requiredMinutes = daySummaries.reduce((t, d) => t + d.requiredMinutes, 0);
 

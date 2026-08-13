@@ -1,4 +1,5 @@
 import type { AppState, ConfirmedShift, DesiredShift, Staff } from "./types";
+import { getStaffShiftStatus, resolveAdminShiftDisplay } from "./publish-state";
 import { isAttendanceStatus } from "./status";
 
 export const GOAL_BLOCK_TIMES = [
@@ -127,10 +128,10 @@ export function buildAdjustingMinutesByDepartment(
     if (staff.role !== "worker" || staff.status !== "active" || !staff.team) continue;
     const desiredShift = desiredShifts.find((shift) => shift.date === date && shift.staffId === staff.id);
     const confirmedShift = confirmedShifts.find((shift) => shift.date === date && shift.staffId === staff.id);
-    const currentStatus = confirmedShift?.status ?? (desiredShift ? "adjusting" : "unconfirmed");
+    const currentStatus = getStaffShiftStatus(confirmedShift, desiredShift);
     if (currentStatus === "unconfirmed") continue;
 
-    const shift = confirmedShift ?? desiredShift;
+    const shift = resolveAdminShiftDisplay(confirmedShift, desiredShift, { currentStatus });
     if (!shift) continue;
 
     totals[staff.team] = (totals[staff.team] ?? 0) + shift.actualMinutes;
@@ -154,7 +155,7 @@ function isDepartmentDayPublished(
   for (const staff of workers) {
     const desiredShift = desiredShifts.find((shift) => shift.date === date && shift.staffId === staff.id);
     const confirmedShift = confirmedShifts.find((shift) => shift.date === date && shift.staffId === staff.id);
-    const currentStatus = confirmedShift?.status ?? (desiredShift ? "adjusting" : "unconfirmed");
+    const currentStatus = getStaffShiftStatus(confirmedShift, desiredShift);
     if (currentStatus === "adjusting") return false;
     if (confirmedShift?.publishedAt && isAttendanceStatus(confirmedShift.status)) {
       hasPublishedConfirmed = true;

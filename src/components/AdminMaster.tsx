@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState, type SetStateAction } from "react";
 import Link from "next/link";
 import { Icons } from "@/components/icons";
-import { useShift } from "@/context/ShiftContext";
+import { useShift } from "@/components/context/ShiftContext";
 import { toDateKeyJst } from "@/lib/shift/dates";
 import { getStaffFullName } from "@/lib/shift/display";
 import { isFixedDepartmentName, getGoalDepartmentLabel } from "@/lib/shift/goal";
@@ -80,15 +80,17 @@ const emptyStaffForm = (team: string): NewStaffForm => ({
   note: "",
 });
 
-function staffToForm(staff: Staff): NewStaffForm {
+function staffToForm(staff: Staff, fallbackTeam = ""): NewStaffForm {
   return {
     name: staff.name,
     firstName: staff.firstName,
     email: staff.email,
     password: "",
-    team: staff.team,
+    team: staff.team.trim() || fallbackTeam,
     status: staff.status,
-    weeklyContractHours: String(staff.weeklyContractHours),
+    weeklyContractHours: Number.isFinite(staff.weeklyContractHours)
+      ? String(staff.weeklyContractHours)
+      : "20",
     hireDate: staff.hireDate,
     contractStartDate: staff.contractStartDate,
     contractEndDate: staff.contractEndDate,
@@ -111,12 +113,16 @@ function formatSlashDate(date: string): string {
 export function AdminMaster() {
   const {
     state,
+    ready,
     isAdmin,
     canManageMaster,
     canManageAdminAccounts,
     updateStaff,
+    saveStaffProfile,
+    refreshStaffFromSupabase,
     createStaff,
     changeStaffPassword,
+    flushStaffPersistForStaff,
     addSalaryRaise,
     updateSalaryRaise,
     deleteStaff,
@@ -133,6 +139,12 @@ export function AdminMaster() {
   const teamDepartments = departments;
 
   const defaultStaffTeam = teamDepartments[0] ?? "";
+
+  useEffect(() => {
+    if (ready) {
+      void refreshStaffFromSupabase();
+    }
+  }, [ready, refreshStaffFromSupabase]);
 
   const [newDepartment, setNewDepartment] = useState("");
   const [tab, setTab] = useState<"staff" | "admin">("staff");
@@ -162,6 +174,27 @@ export function AdminMaster() {
   } | null>(null);
   const [historyEditMessage, setHistoryEditMessage] = useState<string | null>(null);
   const [newStaff, setNewStaff] = useState<NewStaffForm>(() => emptyStaffForm(""));
+
+  const finishAdminEdit = async (adminId: string): Promise<boolean> => {
+    const flushResult = await flushStaffPersistForStaff(adminId);
+    if (!flushResult.ok) {
+      window.alert(flushResult.message);
+      return false;
+    }
+
+    const nextPassword = adminPasswordDraft.trim();
+    if (nextPassword) {
+      const passwordResult = await changeStaffPassword(adminId, nextPassword);
+      if (!passwordResult.ok) {
+        window.alert(passwordResult.message);
+        return false;
+      }
+    }
+
+    setAdminPasswordDraft("");
+    setEditingAdminId((prev) => (prev === adminId ? null : prev));
+    return true;
+  };
   const todayKey = useMemo(() => toDateKeyJst(new Date()), []);
 
   useEffect(() => {
@@ -280,7 +313,7 @@ export function AdminMaster() {
   const openEditStaff = (staff: Staff) => {
     setFormMessage(null);
     setEditingStaffId(staff.id);
-    setEditStaffForm(staffToForm(staff));
+    setEditStaffForm(staffToForm(staff, defaultStaffTeam));
   };
 
   const closeEditStaff = () => {
@@ -291,11 +324,16 @@ export function AdminMaster() {
 
   const handleSaveStaff = async () => {
     if (!editingStaffId || !editStaffForm) return false;
-    const name = editStaffForm.name.trim();
-    const firstName = editStaffForm.firstName.trim();
+    const editingStaff = state.staffList.find((staff) => staff.id === editingStaffId);
+    const name = editStaffForm.name.trim() || editingStaff?.name.trim() || "";
+    const firstName = editStaffForm.firstName.trim() || editingStaff?.firstName.trim() || "";
     const email = editStaffForm.email.trim();
-    const team = editStaffForm.team.trim();
-    const weeklyContractHours = Number(editStaffForm.weeklyContractHours);
+    const team = editStaffForm.team.trim() || defaultStaffTeam;
+    const weeklyContractHours = editStaffForm.socialInsurance
+      ? Number.isFinite(Number(editStaffForm.weeklyContractHours))
+        ? Number(editStaffForm.weeklyContractHours)
+        : 0
+      : Number(editStaffForm.weeklyContractHours);
     const contractRenewalMonths =
       Number(editStaffForm.contractRenewalMonths) || DEFAULT_CONTRACT_RENEWAL_MONTHS;
     const hireDate = editStaffForm.hireDate;
@@ -304,12 +342,24 @@ export function AdminMaster() {
       editStaffForm.contractEndDate ||
       (contractStartDate ? calcContractEndDate(contractStartDate, contractRenewalMonths) : "");
 
-    if (!name || !email || !team || !Number.isFinite(weeklyContractHours)) {
-      setFormMessage("姓・メール・所属は必須です。");
+    if (!name) {
+      setFormMessage("姓を入力してください。");
+      return false;
+    }
+    if (!email) {
+      setFormMessage("メールアドレスを入力してください。");
+      return false;
+    }
+    if (!team) {
+      setFormMessage("所属を選択してください。");
+      return false;
+    }
+    if (!editStaffForm.socialInsurance && !Number.isFinite(weeklyContractHours)) {
+      setFormMessage("契約時間を正しく入力してください。");
       return false;
     }
 
-    updateStaff(editingStaffId, {
+    const result = await saveStaffProfile(editingStaffId, {
       name,
       firstName,
       displayGivenName: editStaffForm.displayGivenName,
@@ -324,6 +374,20 @@ export function AdminMaster() {
       contractRenewalMonths,
       note: editStaffForm.note.trim(),
     });
+    if (!result.ok) {
+      setFormMessage(result.message);
+      return false;
+    }
+
+    const nextPassword = editStaffForm.password.trim();
+    if (nextPassword) {
+      const passwordResult = await changeStaffPassword(editingStaffId, nextPassword);
+      if (!passwordResult.ok) {
+        setFormMessage(passwordResult.message);
+        return false;
+      }
+    }
+
     setFormMessage(null);
     return true;
   };
@@ -497,12 +561,22 @@ export function AdminMaster() {
               <h2 style={{ margin: 0 }}>管理者アカウント</h2>
               <div className="muted">
                 管理者の名前・パスワード・権限・操作可能な所属を管理できます。所属はシフト調整のガント／確定の操作範囲になります。
+                パスワードは編集モードで入力し、「変更」または編集終了（✓）で Auth に反映されます（マネージャーのみ）。
               </div>
             </div>
-            <button type="button" className="btn primary btn-action-green" onClick={() => setAddAdminOpen(true)}>
-              <Icons.Plus size={16} />
-              管理アカウント追加
-            </button>
+            <div className="actions" style={{ gap: 8, marginTop: 0 }}>
+              <button type="button" className="btn primary btn-action-green" onClick={() => {
+                setFormMessage(null);
+                setNewStaff({
+                  ...emptyStaffForm(defaultStaffTeam),
+                  managedTeams: defaultStaffTeam ? [defaultStaffTeam] : [],
+                });
+                setAddAdminOpen(true);
+              }}>
+                <Icons.Plus size={16} />
+                管理アカウント追加
+              </button>
+            </div>
           </div>
           <div className="table-scroll">
             <table className="table master-table master-table-admin">
@@ -567,7 +641,10 @@ export function AdminMaster() {
                                     return;
                                   }
                                   setAdminPasswordDraft("");
-                                  window.alert("パスワードを更新しました。");
+                                  window.alert(
+                                    result.message ||
+                                      "パスワードを更新しました。ログイン確認用に一度ログアウトして試してください。"
+                                  );
                                 })();
                               }}
                             >
@@ -629,8 +706,15 @@ export function AdminMaster() {
                             type="button"
                             className="icon-btn"
                             onClick={() => {
-                              setAdminPasswordDraft("");
-                              setEditingAdminId((prev) => (prev === admin.id ? null : admin.id));
+                              void (async () => {
+                                if (editingAdminId === admin.id) {
+                                  const ok = await finishAdminEdit(admin.id);
+                                  if (!ok) return;
+                                  return;
+                                }
+                                setAdminPasswordDraft("");
+                                setEditingAdminId(admin.id);
+                              })();
                             }}
                             aria-label={editingAdminId === admin.id ? "編集終了" : "編集"}
                           >
@@ -761,9 +845,12 @@ export function AdminMaster() {
                             </span>
                             <div className="staff-cell-text">
                               <div className="staff-cell-name">{getStaffFullName(staff)}</div>
-                              {staff.email || staff.googleEmail ? (
-                                <div className="staff-cell-sub">{staff.email || staff.googleEmail}</div>
-                              ) : null}
+                              <div className="staff-cell-sub">
+                                {staff.team || "未所属"}
+                                {staff.email || staff.googleEmail
+                                  ? ` · ${staff.email || staff.googleEmail}`
+                                  : ""}
+                              </div>
                             </div>
                           </div>
                         </td>
@@ -1140,8 +1227,16 @@ export function AdminMaster() {
                     setFormMessage("名前・メール・パスワードは必須です。");
                     return;
                   }
+                  if (password.length < 6) {
+                    setFormMessage("パスワードは6文字以上にしてください。");
+                    return;
+                  }
                   if (newStaff.managedTeams.length === 0) {
                     setFormMessage("操作できる所属を1つ以上選択してください。");
+                    return;
+                  }
+                  if (departments.length === 0) {
+                    setFormMessage("所属マスタが未設定です。先に「所属管理」でチームを追加してください。");
                     return;
                   }
                   const result = await createStaff({
@@ -1520,6 +1615,13 @@ function StaffFormModal({
     password: string
   ) => Promise<{ ok: true } | { ok: false; message: string }>;
 }) {
+  useEffect(() => {
+    if (mode !== "edit") return;
+    if (!form.team.trim() && departments[0]) {
+      setForm((prev) => ({ ...prev, team: departments[0] }));
+    }
+  }, [mode, departments, form.team, setForm]);
+
   return (
     <div className="modal-backdrop" onClick={onCancel}>
       <div className="modal-panel modal-panel-wide" onClick={(e) => e.stopPropagation()}>
@@ -1534,7 +1636,6 @@ function StaffFormModal({
                 onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
                 placeholder="例: 山田"
                 autoFocus
-                required
               />
             </label>
             <label className="staff-form-name">
@@ -1608,7 +1709,13 @@ function StaffFormModal({
           <div className="staff-form-pair-row">
             <label>
               所属
-              <select value={form.team} onChange={(e) => setForm((prev) => ({ ...prev, team: e.target.value }))}>
+              <select
+                value={form.team || departments[0] || ""}
+                onChange={(e) => setForm((prev) => ({ ...prev, team: e.target.value }))}
+              >
+                {!form.team && !departments[0] ? (
+                  <option value="">所属を選択</option>
+                ) : null}
                 {departments.map((department) => (
                   <option key={department} value={department}>
                     {department}

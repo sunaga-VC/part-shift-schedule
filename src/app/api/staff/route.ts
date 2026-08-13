@@ -1,7 +1,17 @@
 import { NextResponse } from "next/server";
-import { requireManagerService, getServiceClient } from "@/lib/supabase/adminApi";
+import {
+  requireManagerService,
+  requireFullManagerService,
+  requireAuthenticatedProfileService,
+  getServiceClient,
+  findAuthUserByEmail,
+  formatAuthUpdateError,
+  resolveAuthUserForProfile,
+} from "@/lib/supabase/adminApi";
+import { removeOrphanAuthUserForEmail } from "@/lib/supabase/syncAuthUsers";
 import { canManageAdminAccounts, normalizeAdminPermission } from "@/lib/shift/permissions";
 import type { AdminPermission } from "@/lib/shift/types";
+import { persistStaffUpdate, persistStaffDelete, type StaffPersistPatch } from "@/lib/supabase/staff";
 
 type ServiceClient = NonNullable<ReturnType<typeof getServiceClient>>;
 
@@ -67,11 +77,13 @@ async function resolveDepartmentId(
 }
 
 export async function POST(request: Request) {
-  const auth = await requireManagerService();
-  if (!auth.ok) return auth.response;
-  const service = auth.service;
+  let body: CreateStaffBody;
+  try {
+    body = (await request.json()) as CreateStaffBody;
+  } catch {
+    return NextResponse.json({ ok: false, message: "リクエスト形式が正しくありません。" }, { status: 400 });
+  }
 
-  const body = (await request.json()) as CreateStaffBody;
   const email = body.email?.trim().toLowerCase() ?? "";
   const password = body.password?.trim() ?? "";
   const name = body.name?.trim() ?? "";
@@ -91,10 +103,21 @@ export async function POST(request: Request) {
     );
   }
 
-  if (role === "admin" && !canManageAdminAccounts(auth.adminPermission)) {
+  if (password.length < 6) {
     return NextResponse.json(
-      { ok: false, message: "管理者アカウントの作成はマネージャーのみ可能です。" },
-      { status: 403 }
+      { ok: false, message: "パスワードは6文字以上にしてください。" },
+      { status: 400 }
+    );
+  }
+
+  const auth = role === "admin" ? await requireFullManagerService() : await requireManagerService();
+  if (!auth.ok) return auth.response;
+  const service = auth.service;
+
+  if (role === "admin" && managedTeams.length === 0) {
+    return NextResponse.json(
+      { ok: false, message: "管理者には操作できる所属を1つ以上選択してください。" },
+      { status: 400 }
     );
   }
 
@@ -102,11 +125,46 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, message: "所属は必須です。" }, { status: 400 });
   }
 
-  if (role === "admin" && managedTeams.length === 0) {
+  const { data: duplicatedProfile } = await service
+    .from("staff_profiles")
+    .select("id")
+    .eq("email", email)
+    .maybeSingle();
+  if (duplicatedProfile) {
     return NextResponse.json(
-      { ok: false, message: "管理者には操作できる所属を1つ以上選択してください。" },
+      { ok: false, message: "このメールアドレスは既に staff_profiles に登録されています。" },
       { status: 400 }
     );
+  }
+
+  const duplicatedAuth = await findAuthUserByEmail(service, email);
+  if (duplicatedAuth) {
+    const { data: profileForAuth } = await service
+      .from("staff_profiles")
+      .select("id")
+      .eq("id", duplicatedAuth.id)
+      .maybeSingle();
+    if (profileForAuth) {
+      return NextResponse.json(
+        {
+          ok: false,
+          message: formatAuthUpdateError("このメールアドレスは Auth に既に登録されています。"),
+        },
+        { status: 400 }
+      );
+    }
+    const { error: deleteOrphanError } = await service.auth.admin.deleteUser(duplicatedAuth.id);
+    if (deleteOrphanError) {
+      return NextResponse.json(
+        {
+          ok: false,
+          message: formatAuthUpdateError(
+            `孤立 Auth の削除に失敗しました: ${deleteOrphanError.message}`
+          ),
+        },
+        { status: 400 }
+      );
+    }
   }
 
   let departmentId: string | null = null;
@@ -152,7 +210,10 @@ export async function POST(request: Request) {
 
   if (createError || !created.user) {
     return NextResponse.json(
-      { ok: false, message: createError?.message || "Auth ユーザーの作成に失敗しました。" },
+      {
+        ok: false,
+        message: formatAuthUpdateError(createError?.message || "Auth ユーザーの作成に失敗しました。"),
+      },
       { status: 400 }
     );
   }
@@ -224,6 +285,148 @@ type UpdateAuthBody = {
   email?: string;
 };
 
+async function applyAuthCredentialPatch(
+  service: ServiceClient,
+  staffId: string,
+  profileEmail: string,
+  password: string,
+  email?: string
+): Promise<NextResponse> {
+  const nextEmail = email?.trim().toLowerCase() ?? "";
+  const emailChanging = Boolean(nextEmail) && nextEmail !== profileEmail.trim().toLowerCase();
+
+  let authUser: { id: string; email: string | null } | null = null;
+  try {
+    authUser = await resolveAuthUserForProfile(service, staffId, profileEmail);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Auth ユーザーの検索に失敗しました。";
+    return NextResponse.json({ ok: false, message }, { status: 500 });
+  }
+  let authUserId = authUser?.id ?? null;
+
+  if (emailChanging) {
+    const { data: duplicated } = await service
+      .from("staff_profiles")
+      .select("id")
+      .eq("email", nextEmail)
+      .neq("id", staffId)
+      .maybeSingle();
+    if (duplicated) {
+      return NextResponse.json(
+        { ok: false, message: "このメールアドレスは既に使用されています。" },
+        { status: 400 }
+      );
+    }
+
+    const duplicatedAuth = await findAuthUserByEmail(service, nextEmail);
+    if (duplicatedAuth && duplicatedAuth.id !== staffId && duplicatedAuth.id !== authUserId) {
+      const orphanResult = await removeOrphanAuthUserForEmail(service, staffId, nextEmail);
+      if (orphanResult.message) {
+        return NextResponse.json(
+          { ok: false, message: formatAuthUpdateError(orphanResult.message) },
+          { status: 400 }
+        );
+      }
+      if (!orphanResult.removed) {
+        return NextResponse.json(
+          {
+            ok: false,
+            message:
+              "このメールアドレスは別の Auth ユーザーに登録されています。Supabase Dashboard で重複を確認してください。",
+          },
+          { status: 400 }
+        );
+      }
+      try {
+        authUser = await resolveAuthUserForProfile(service, staffId, profileEmail);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Auth ユーザーの検索に失敗しました。";
+        return NextResponse.json({ ok: false, message }, { status: 500 });
+      }
+      authUserId = authUser?.id ?? staffId;
+    }
+  }
+
+  const authPatch: { password?: string; email?: string; email_confirm?: boolean } = {};
+  if (password) authPatch.password = password;
+  if (emailChanging) {
+    authPatch.email = nextEmail;
+    authPatch.email_confirm = true;
+  }
+
+  if (Object.keys(authPatch).length === 0) {
+    return NextResponse.json({ ok: true });
+  }
+
+  if (!authUserId) {
+    const createEmail = nextEmail || profileEmail;
+    if (!createEmail || !password) {
+      return NextResponse.json(
+        {
+          ok: false,
+          message:
+            "Auth ユーザーが見つかりません。パスワードを入力して保存すると、プロフィール ID に紐づく Auth ユーザーを新規作成します。",
+        },
+        { status: 404 }
+      );
+    }
+
+    const { data: created, error: createError } = await service.auth.admin.createUser({
+      id: staffId,
+      email: createEmail,
+      password,
+      email_confirm: true,
+    });
+    if (createError || !created.user) {
+      return NextResponse.json(
+        {
+          ok: false,
+          message: formatAuthUpdateError(createError?.message || "Auth ユーザーの作成に失敗しました。"),
+        },
+        { status: 400 }
+      );
+    }
+
+    if (emailChanging) {
+      const { error: profileError } = await service
+        .from("staff_profiles")
+        .update({ email: nextEmail })
+        .eq("id", staffId);
+      if (profileError) {
+        return NextResponse.json(
+          { ok: false, message: `プロフィールのメール更新に失敗: ${profileError.message}` },
+          { status: 400 }
+        );
+      }
+    }
+
+    return NextResponse.json({ ok: true });
+  }
+
+  const { error: updateError } = await service.auth.admin.updateUserById(authUserId, authPatch);
+  if (updateError) {
+    return NextResponse.json(
+      { ok: false, message: formatAuthUpdateError(updateError.message || "アカウント情報の更新に失敗しました。") },
+      { status: 400 }
+    );
+  }
+
+  if (emailChanging) {
+    const { error: profileError } = await service
+      .from("staff_profiles")
+      .update({ email: nextEmail })
+      .eq("id", staffId);
+    if (profileError) {
+      return NextResponse.json(
+        { ok: false, message: `プロフィールのメール更新に失敗: ${profileError.message}` },
+        { status: 400 }
+      );
+    }
+  }
+
+  return NextResponse.json({ ok: true });
+}
+
 /** ログイン用メール / パスワードの変更（Auth + staff_profiles） */
 export async function PATCH(request: Request) {
   const body = (await request.json()) as UpdateAuthBody;
@@ -247,6 +450,27 @@ export async function PATCH(request: Request) {
 
   if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return NextResponse.json({ ok: false, message: "メールアドレスの形式が正しくありません。" }, { status: 400 });
+  }
+
+  // 自分自身のパスワード変更（一般管理者・スタッフも可）
+  if (password && !email) {
+    const selfAuth = await requireAuthenticatedProfileService();
+    if (selfAuth.ok && selfAuth.profileId === staffId) {
+      const { data: target, error: targetError } = await selfAuth.service
+        .from("staff_profiles")
+        .select("id, email")
+        .eq("id", staffId)
+        .maybeSingle();
+
+      if (targetError || !target) {
+        return NextResponse.json(
+          { ok: false, message: targetError?.message || "対象ユーザーが見つかりません。" },
+          { status: 404 }
+        );
+      }
+
+      return applyAuthCredentialPatch(selfAuth.service, staffId, target.email ?? "", password);
+    }
   }
 
   const auth = await requireManagerService();
@@ -273,47 +497,99 @@ export async function PATCH(request: Request) {
     );
   }
 
-  if (email && email !== (target.email ?? "").toLowerCase()) {
-    const { data: duplicated } = await service
-      .from("staff_profiles")
-      .select("id")
-      .eq("email", email)
-      .neq("id", staffId)
-      .maybeSingle();
-    if (duplicated) {
-      return NextResponse.json(
-        { ok: false, message: "このメールアドレスは既に使用されています。" },
-        { status: 400 }
-      );
-    }
-  }
+  const profileEmail = (target.email ?? "").trim().toLowerCase();
 
-  const authPatch: { password?: string; email?: string; email_confirm?: boolean } = {};
-  if (password) authPatch.password = password;
-  if (email) {
-    authPatch.email = email;
-    authPatch.email_confirm = true;
-  }
+  return applyAuthCredentialPatch(service, staffId, profileEmail, password, email);
+}
 
-  const { error: updateError } = await service.auth.admin.updateUserById(staffId, authPatch);
-  if (updateError) {
+type UpdateProfileBody = {
+  id: string;
+  patch: StaffPersistPatch;
+};
+
+/** staff_profiles の部分更新（service role 経由） */
+export async function PUT(request: Request) {
+  const auth = await requireManagerService();
+  if (!auth.ok) return auth.response;
+  const service = auth.service;
+
+  const body = (await request.json()) as UpdateProfileBody;
+  const staffId = body.id?.trim() ?? "";
+  const patch = body.patch ?? {};
+
+  if (!staffId || Object.keys(patch).length === 0) {
     return NextResponse.json(
-      { ok: false, message: updateError.message || "アカウント情報の更新に失敗しました。" },
+      { ok: false, message: "対象ユーザーと更新内容が必要です。" },
       { status: 400 }
     );
   }
 
-  if (email) {
-    const { error: profileError } = await service
-      .from("staff_profiles")
-      .update({ email })
-      .eq("id", staffId);
-    if (profileError) {
-      return NextResponse.json(
-        { ok: false, message: `プロフィールのメール更新に失敗: ${profileError.message}` },
-        { status: 400 }
-      );
-    }
+  const { data: target, error: targetError } = await service
+    .from("staff_profiles")
+    .select("id, role")
+    .eq("id", staffId)
+    .maybeSingle();
+
+  if (targetError || !target) {
+    return NextResponse.json(
+      { ok: false, message: targetError?.message || "対象ユーザーが見つかりません。" },
+      { status: 404 }
+    );
+  }
+
+  if (target.role === "admin" && !canManageAdminAccounts(auth.adminPermission)) {
+    return NextResponse.json(
+      { ok: false, message: "管理者アカウントの変更はマネージャーのみ可能です。" },
+      { status: 403 }
+    );
+  }
+
+  const result = await persistStaffUpdate(service, staffId, patch);
+  if (!result.ok) {
+    return NextResponse.json({ ok: false, message: result.message }, { status: 400 });
+  }
+
+  return NextResponse.json({ ok: true });
+}
+
+type DeleteStaffBody = {
+  id?: string;
+};
+
+/** スタッフ削除（退職フォールバック含む） */
+export async function DELETE(request: Request) {
+  const auth = await requireManagerService();
+  if (!auth.ok) return auth.response;
+
+  const body = (await request.json()) as DeleteStaffBody;
+  const staffId = body.id?.trim() ?? "";
+  if (!staffId) {
+    return NextResponse.json({ ok: false, message: "対象ユーザー ID が必要です。" }, { status: 400 });
+  }
+
+  const { data: target, error: targetError } = await auth.service
+    .from("staff_profiles")
+    .select("id, role")
+    .eq("id", staffId)
+    .maybeSingle();
+
+  if (targetError || !target) {
+    return NextResponse.json(
+      { ok: false, message: targetError?.message || "対象ユーザーが見つかりません。" },
+      { status: 404 }
+    );
+  }
+
+  if (target.role === "admin" && !canManageAdminAccounts(auth.adminPermission)) {
+    return NextResponse.json(
+      { ok: false, message: "管理者アカウントの削除はマネージャーのみ可能です。" },
+      { status: 403 }
+    );
+  }
+
+  const result = await persistStaffDelete(auth.service, staffId);
+  if (!result.ok) {
+    return NextResponse.json({ ok: false, message: result.message }, { status: 400 });
   }
 
   return NextResponse.json({ ok: true });

@@ -1,7 +1,17 @@
 const MINUTES_PER_HOUR = 60;
 
+/** HH:mm 表示用。DB の "10:00:00" などを "10:00" に揃える */
+export function normalizeDisplayTime(time: string): string {
+  if (!time) return time;
+  const parts = time.split(":");
+  if (parts.length < 2) return time;
+  const hours = parts[0].padStart(2, "0");
+  const minutes = parts[1].padStart(2, "0");
+  return `${hours}:${minutes}`;
+}
+
 export function toMinutes(time: string): number {
-  const [hours, minutes] = time.split(":").map((part) => Number(part));
+  const [hours, minutes] = normalizeDisplayTime(time).split(":").map((part) => Number(part));
   if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return 0;
   return hours * MINUTES_PER_HOUR + minutes;
 }
@@ -44,7 +54,7 @@ export function calcBreakMinutes(startTime: string, endTime: string): number {
 }
 
 export function formatTimeRange(startTime: string, endTime: string): string {
-  return `${startTime}～${endTime}`;
+  return `${normalizeDisplayTime(startTime)}～${normalizeDisplayTime(endTime)}`;
 }
 
 export function formatShiftSummary(startTime: string, endTime: string, breakMinutes: number): string {
@@ -58,7 +68,7 @@ export function isValidTimeRange(startTime: string, endTime: string): boolean {
 
 /** HH:MM を30分単位に丸める（近い方へ） */
 export function snapTimeToHalfHour(time: string): string {
-  const total = toMinutes(time);
+  const total = toMinutes(normalizeDisplayTime(time));
   const snapped = Math.round(total / 30) * 30;
   const clamped = Math.min(Math.max(snapped, 0), 23 * 60 + 30);
   const hours = Math.floor(clamped / MINUTES_PER_HOUR);

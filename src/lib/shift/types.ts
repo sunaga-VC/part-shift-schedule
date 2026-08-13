@@ -174,5 +174,7 @@ export interface AppState {
   confirmedShifts: ConfirmedShift[];
   requiredShifts: RequiredShiftCount[];
   homeMessages: HomeMessage[];
+  /** アルバイト画面: 所属の確定週（月〜金）に含まれる日付。セル色の統一用 */
+  workerPublishedDates?: string[];
   currentUserId: string;
 }

@@ -78,120 +78,23 @@ export async function fetchStaffBootstrap(supabase: SupabaseClient): Promise<Sta
       code === "session_not_found" ||
       message.includes("Refresh Token")
     ) {
-      // 失効したセッション Cookie を捨てる（コンソールの AuthApiError 対策）
       await supabase.auth.signOut({ scope: "local" });
     }
     return null;
   }
-  if (!user) return null;
+  const email = user?.email?.trim().toLowerCase();
+  if (!email) return null;
 
-  const { data: departments, error: deptError } = await supabase
-    .from("departments")
-    .select("id, name, sort_order")
-    .order("sort_order", { ascending: true });
-
-  if (deptError) {
-    console.error("departments fetch failed", deptError);
-    if (deptError.message?.includes("permission denied")) {
-      console.error(
-        "departments の GRANT が不足しています。Supabase SQL Editor で grant_table_privileges マイグレーションを実行してください。"
-      );
+  const response = await fetch("/api/bootstrap/staff", { method: "GET", credentials: "same-origin" });
+  if (!response.ok) {
+    if (response.status === 401) {
+      await supabase.auth.signOut({ scope: "local" });
     }
+    return null;
   }
 
-  const departmentRows = departments ?? [];
-  const departmentNameById = Object.fromEntries(departmentRows.map((d) => [d.id, d.name]));
-
-  const { data: managedRows, error: managedFetchError } = await supabase
-    .from("staff_managed_departments")
-    .select("staff_id, department_id");
-
-  if (managedFetchError) {
-    console.warn(
-      "staff_managed_departments の取得に失敗しました。マイグレーション未適用の可能性があります:",
-      managedFetchError.message || managedFetchError
-    );
-  }
-
-  const managedTeamsByStaffId = new Map<string, string[]>();
-  for (const row of managedRows ?? []) {
-    const name = departmentNameById[row.department_id];
-    if (!name) continue;
-    const list = managedTeamsByStaffId.get(row.staff_id) ?? [];
-    list.push(name);
-    managedTeamsByStaffId.set(row.staff_id, list);
-  }
-
-  // departments 埋め込みは FK 追加後に曖昧になりやすいので使わず、department_id から名前解決する
-  const { data: profiles, error: profileError } = await supabase
-    .from("staff_profiles")
-    .select("*, salary_raises(*)")
-    .order("last_name", { ascending: true });
-
-  if (profileError) {
-    const detail = [
-      profileError.message,
-      profileError.code,
-      profileError.details,
-      profileError.hint,
-    ]
-      .filter(Boolean)
-      .join(" | ");
-    console.error("staff_profiles fetch failed", detail || profileError);
-
-    const { data: self, error: selfError } = await supabase
-      .from("staff_profiles")
-      .select("*, salary_raises(*)")
-      .eq("id", user.id)
-      .maybeSingle();
-    if (selfError) {
-      console.error(
-        "staff_profiles self fetch failed",
-        [selfError.message, selfError.code, selfError.details, selfError.hint].filter(Boolean).join(" | ") ||
-          selfError
-      );
-    }
-    if (!self) return null;
-    return {
-      userId: user.id,
-      departments: departmentRows.map((d) => d.name).filter((name) => name !== "本部"),
-      staffList: [
-        mapStaffProfile(
-          self as unknown as ProfileWithRaises,
-          departmentNameById,
-          managedTeamsByStaffId.get(user.id) ?? []
-        ),
-      ],
-    };
-  }
-
-  const staffList = (profiles as unknown as ProfileWithRaises[]).map((row) =>
-    mapStaffProfile(row, departmentNameById, managedTeamsByStaffId.get(row.id) ?? [])
-  );
-
-  // 自分が一覧に無い場合は追加
-  if (!staffList.some((s) => s.id === user.id)) {
-    const { data: self } = await supabase
-      .from("staff_profiles")
-      .select("*, salary_raises(*)")
-      .eq("id", user.id)
-      .maybeSingle();
-    if (self) {
-      staffList.unshift(
-        mapStaffProfile(
-          self as unknown as ProfileWithRaises,
-          departmentNameById,
-          managedTeamsByStaffId.get(user.id) ?? []
-        )
-      );
-    }
-  }
-
-  return {
-    userId: user.id,
-    departments: departmentRows.map((d) => d.name).filter((name) => name !== "本部"),
-    staffList,
-  };
+  const payload = (await response.json()) as { ok?: boolean; bootstrap?: StaffBootstrap; message?: string };
+  return payload.ok ? payload.bootstrap ?? null : null;
 }
 
 export type StaffPersistPatch = Partial<{

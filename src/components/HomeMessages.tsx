@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { Icons } from "@/components/icons";
-import { useShift } from "@/context/ShiftContext";
+import { useShift } from "@/components/context/ShiftContext";
 import { listOperableDepartmentNames } from "@/lib/shift/adminDepartments";
 import { getStaffDisplayName } from "@/lib/shift/display";
 import type { HomeMessage, Staff } from "@/lib/shift/types";
@@ -47,8 +47,8 @@ export function AdminHomeMessages() {
   // マネージャー / アルバイト管理者はメッセージ編集可
   if (!canManageMaster) return null;
 
-  const submit = () => {
-    const result = createHomeMessage({
+  const submit = async () => {
+    const result = await createHomeMessage({
       body,
       audience,
       team: audience === "team" ? team || teams[0] : undefined,
@@ -130,7 +130,7 @@ export function AdminHomeMessages() {
                 ))}
               </select>
             </label>
-            <button type="button" className="btn primary" onClick={submit}>
+            <button type="button" className="btn primary" onClick={() => void submit()}>
               送信
             </button>
           </div>
@@ -160,7 +160,7 @@ export function AdminHomeMessages() {
                       type="button"
                       className="icon-btn danger"
                       aria-label="削除"
-                      onClick={() => deleteHomeMessage(message.id)}
+                      onClick={() => void deleteHomeMessage(message.id)}
                     >
                       <Icons.Trash size={14} />
                     </button>

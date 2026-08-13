@@ -4,8 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import { getStaffDisplayName } from "@/lib/shift/display";
 import { formatDateShort } from "@/lib/shift/dates";
 import { getGoalDepartmentLabel } from "@/lib/shift/goal";
+import { getStaffShiftStatus } from "@/lib/shift/publish-state";
 import { getShiftStatusLabel, isAttendanceStatus } from "@/lib/shift/status";
-import { formatMinutes, formatTimeRange, toMinutes } from "@/lib/shift/time";
+import { formatMinutes, formatTimeRange, normalizeDisplayTime, toMinutes } from "@/lib/shift/time";
 import type { ConfirmedShift, DesiredShift, Staff } from "@/lib/shift/types";
 
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"] as const;
@@ -47,7 +48,7 @@ function buildEntriesForDate(
     .map((staff) => {
       const desiredShift = desiredShifts.find((shift) => shift.date === date && shift.staffId === staff.id);
       const confirmedShift = confirmedShifts.find((shift) => shift.date === date && shift.staffId === staff.id);
-      const currentStatus = confirmedShift?.status ?? (desiredShift ? "adjusting" : "unconfirmed");
+      const currentStatus = getStaffShiftStatus(confirmedShift, desiredShift);
       return { staff, desiredShift, confirmedShift, currentStatus };
     })
     .filter((entry) => Boolean(entry.desiredShift || entry.confirmedShift))
@@ -132,7 +133,7 @@ function DayGanttBlock({
                       style={barStyle(shift.startTime, shift.endTime)}
                       title={`${getStaffDisplayName(staff)}さん ${formatTimeRange(shift.startTime, shift.endTime)}`}
                     >
-                      <span className="gantt-time-start"> {shift.startTime}</span>
+                      <span className="gantt-time-start"> {normalizeDisplayTime(shift.startTime)}</span>
                       <span className="gantt-center-stack">
                         <span className="gantt-time-center">
                           {formatTimeRange(shift.startTime, shift.endTime)}
@@ -144,7 +145,7 @@ function DayGanttBlock({
                           </span>
                         ) : null}
                       </span>
-                      <span className="gantt-time-end">{shift.endTime} </span>
+                      <span className="gantt-time-end">{normalizeDisplayTime(shift.endTime)} </span>
                     </div>
                   ) : (
                     <div style={{ minHeight: 24 }} />

@@ -3,12 +3,15 @@
 import { useMemo, useState } from "react";
 import { CalendarNavToolbar } from "@/components/CalendarNavToolbar";
 import { Icons } from "@/components/icons";
-import { useShift } from "@/context/ShiftContext";
+import { useShift } from "@/components/context/ShiftContext";
 import { useWorkCalendarNavigation } from "@/hooks/useWorkCalendarNavigation";
 import { formatDateLong, formatDateShort } from "@/lib/shift/dates";
 import { getStaffDisplayName } from "@/lib/shift/display";
-import { hasStaffPendingAdjustment } from "@/lib/shift/publish-state";
-import { isAttendanceStatus } from "@/lib/shift/status";
+import {
+  hasStaffPendingAdjustment,
+  isWorkerCalendarDatePublished,
+  resolveWorkerShiftDisplay,
+} from "@/lib/shift/publish-state";
 import {
   clampTimeToOptions,
   formatTimeRange,
@@ -23,6 +26,7 @@ export function WishCalendarPage() {
     workers,
     upsertDesiredShift,
     deleteDesiredShift,
+    flushShiftPersist,
   } = useShift();
 
   const {
@@ -37,10 +41,6 @@ export function WishCalendarPage() {
     handleSelectMonth,
     handleChangeYear,
   } = useWorkCalendarNavigation();
-  const publishedWeekDates = useMemo(() => {
-    const group = weekGroups.find((group) => group[0] === state.period.publishedWeekStartDate);
-    return group ?? [];
-  }, [state.period.publishedWeekStartDate, weekGroups]);
   const [selectedDate, setSelectedDate] = useState(defaultSelectedDateKey);
   const [detailOpen, setDetailOpen] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -50,6 +50,8 @@ export function WishCalendarPage() {
   const [message, setMessage] = useState<string | null>(null);
 
   const isWorkerView = !isAdmin && currentUser?.role === "worker";
+  const workerPublishedDates = state.workerPublishedDates;
+  const knownDepartments = useMemo(() => new Set(state.departments), [state.departments]);
 
   const myWish = state.desiredShifts.find(
     (s) => s.staffId === currentUser?.id && s.date === selectedDate
@@ -57,69 +59,77 @@ export function WishCalendarPage() {
   const selectedDateConfirmedShift = state.confirmedShifts.find(
     (s) => s.staffId === currentUser?.id && s.date === selectedDate
   );
-  const selectedDateIsPublished = publishedWeekDates.includes(selectedDate);
-  const selectedDatePending = hasStaffPendingAdjustment(
+  const selectedDateDisplay = resolveWorkerShiftDisplay(
     state.period,
     selectedDateConfirmedShift,
     myWish,
-    selectedDate
+    selectedDate,
+    workerPublishedDates
   );
+
+  function isPublishedCalendarDate(date: string) {
+    return isWorkerCalendarDatePublished(
+      date,
+      workerPublishedDates,
+      state.period,
+      state.staffList,
+      state.confirmedShifts,
+      currentUser?.team ?? "",
+      currentUser?.id ?? "",
+      { knownDepartments }
+    );
+  }
 
   function renderDayTime(
     date: string,
     mine: typeof myWish,
-    confirmedShift: typeof selectedDateConfirmedShift,
-    isPublishedDate: boolean
+    confirmedShift: typeof selectedDateConfirmedShift
   ) {
-    const pending = hasStaffPendingAdjustment(state.period, confirmedShift, mine, date);
-    if (isPublishedDate && !pending) {
-        if (confirmedShift?.publishedAt) {
-        if (isAttendanceStatus(confirmedShift.status)) {
-          return (
-            <span className="published-time">
-              {formatTimeRange(confirmedShift.startTime, confirmedShift.endTime)}
-            </span>
-          );
-        }
-        return <span className="muted">休み</span>;
-      }
+    const display = resolveWorkerShiftDisplay(
+      state.period,
+      confirmedShift,
+      mine,
+      date,
+      workerPublishedDates
+    );
+    if (display.kind === "rest") {
       return <span className="muted">休み</span>;
     }
-    if (mine) {
-      return <span className="wish-edited-time">{formatTimeRange(mine.startTime, mine.endTime)}</span>;
+    if (display.kind === "confirmed") {
+      return (
+        <span className="published-time">
+          {formatTimeRange(display.shift.startTime, display.shift.endTime)}
+        </span>
+      );
     }
-    if (isPublishedDate && pending) {
+    if (display.kind === "wish") {
+      return (
+        <span className="wish-edited-time">
+          {formatTimeRange(display.shift.startTime, display.shift.endTime)}
+        </span>
+      );
+    }
+    if (display.pending) {
       return <span className="wish-edited-time">設定なし</span>;
     }
     return <span className="muted">設定なし</span>;
   }
 
   function renderSelfTimeLabel() {
-    if (selectedDateIsPublished && !selectedDatePending) {
-      if (selectedDateConfirmedShift?.publishedAt) {
-        return isAttendanceStatus(selectedDateConfirmedShift.status)
-          ? formatTimeRange(selectedDateConfirmedShift.startTime, selectedDateConfirmedShift.endTime)
-          : "休み";
-      }
-      return "休み";
+    if (selectedDateDisplay.kind === "rest") return "休み";
+    if (selectedDateDisplay.kind === "confirmed") {
+      return formatTimeRange(selectedDateDisplay.shift.startTime, selectedDateDisplay.shift.endTime);
     }
-    if (myWish) {
-      return formatTimeRange(myWish.startTime, myWish.endTime);
-    }
-    if (selectedDateIsPublished && selectedDatePending) {
-      return "設定なし";
+    if (selectedDateDisplay.kind === "wish") {
+      return formatTimeRange(selectedDateDisplay.shift.startTime, selectedDateDisplay.shift.endTime);
     }
     return "設定なし";
   }
 
   function renderSelfTimeClassName() {
-    if (selectedDateIsPublished && !selectedDatePending) {
-      if (selectedDateConfirmedShift?.publishedAt && isAttendanceStatus(selectedDateConfirmedShift.status)) {
-        return "self-time published-time";
-      }
-      return "self-time muted";
-    }
-    if (myWish || (selectedDateIsPublished && selectedDatePending)) {
+    if (selectedDateDisplay.kind === "rest") return "self-time muted";
+    if (selectedDateDisplay.kind === "confirmed") return "self-time published-time";
+    if (selectedDateDisplay.kind === "wish" || selectedDateDisplay.pending) {
       return "self-time wish-edited-time";
     }
     return "self-time muted";
@@ -176,7 +186,7 @@ export function WishCalendarPage() {
     if (forCreate) setMessage(null);
   }
 
-  function handleSave() {
+  async function handleSave() {
     const result = upsertDesiredShift({
       date: selectedDate,
       startTime: clampTimeToOptions(startTime, timeOptions),
@@ -187,14 +197,24 @@ export function WishCalendarPage() {
       setMessage(result.message);
       return;
     }
+    const persisted = await flushShiftPersist();
+    if (!persisted.ok) {
+      setMessage(`保存に失敗しました: ${persisted.message}`);
+      return;
+    }
     setEditing(false);
-    setMessage("保存しました。管理者画面と希望者リストに即時反映されます。");
+    setMessage("保存しました。管理者画面に反映されます。");
   }
 
-  function handleDelete() {
+  async function handleDelete() {
     const result = deleteDesiredShift(selectedDate);
     if (!result.ok) {
       setMessage(result.message);
+      return;
+    }
+    const persisted = await flushShiftPersist();
+    if (!persisted.ok) {
+      setMessage(`削除に失敗しました: ${persisted.message}`);
       return;
     }
     setEditing(false);
@@ -259,7 +279,9 @@ export function WishCalendarPage() {
               </div>
             ))}
           {currentUser?.role === "worker" && !myWish && dayWishes.length === 0 && (
-            <div className="muted">設定なし</div>
+            <div className="muted">
+              {selectedDateDisplay.kind === "rest" ? "休み" : "設定なし"}
+            </div>
           )}
         </div>
       </div>
@@ -361,14 +383,21 @@ export function WishCalendarPage() {
                     const confirmedShift = state.confirmedShifts.find(
                       (s) => s.staffId === currentUser?.id && s.date === date
                     );
-                    const isPublishedDate = publishedWeekDates.includes(date);
+                    const isPublishedDate = isPublishedCalendarDate(date);
+                    const isPendingAdjustment = hasStaffPendingAdjustment(
+                      state.period,
+                      confirmedShift,
+                      mine,
+                      date,
+                      workerPublishedDates
+                    );
                     return (
                       <button
                         key={date}
                         type="button"
                         className={`day-cell${selectedDate === date ? " selected" : ""}${
                           weekIndex < currentWeekIndex ? " past" : ""
-                        }${publishedWeekDates.includes(date) ? " published-date" : ""}`}
+                        }${isPendingAdjustment ? " pending-adjustment-date" : isPublishedDate ? " published-date" : ""}`}
                         onClick={() => selectDate(date)}
                       >
                         <div
@@ -384,7 +413,7 @@ export function WishCalendarPage() {
                             希望 {count}人
                           </span>
                         </div>
-                        <div className="day-meta">{renderDayTime(date, mine, confirmedShift, isPublishedDate)}</div>
+                        <div className="day-meta">{renderDayTime(date, mine, confirmedShift)}</div>
                       </button>
                     );
                   })}

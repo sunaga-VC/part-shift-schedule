@@ -1,6 +1,21 @@
 import { createClient } from "@/lib/supabase/client";
 import { buildGoalRequiredMinutesByDepartment, createDefaultGoalBlocks, normalizeGoalBlocks } from "@/lib/shift/goal";
-import type { AppState, ConfirmedShift, DesiredShift, GoalMemo, RequiredShiftCount, ShiftPeriod } from "@/lib/shift/types";
+import { getMondayOfWeek, getWeekDates } from "@/lib/shift/dates";
+import {
+  computeWorkerPublishedDates,
+  hasWishChangedAfterPublish,
+  isRestConfirmedShift,
+} from "@/lib/shift/publish-state";
+import { normalizeDisplayTime } from "@/lib/shift/time";
+import type {
+  AppState,
+  ConfirmedShift,
+  DesiredShift,
+  GoalMemo,
+  RequiredShiftCount,
+  ShiftPeriod,
+  Staff,
+} from "@/lib/shift/types";
 import type { Database } from "@/lib/supabase/database.types";
 
 type SupabaseClient = ReturnType<typeof createClient>;
@@ -20,7 +35,13 @@ type GoalMemoInsert = Database["public"]["Tables"]["goal_memos"]["Insert"];
 
 export type ShiftPersistenceSnapshot = Pick<
   AppState,
-  "period" | "desiredShifts" | "confirmedShifts" | "requiredShifts" | "goalBlocksByDate" | "goalMemos"
+  | "period"
+  | "desiredShifts"
+  | "confirmedShifts"
+  | "requiredShifts"
+  | "goalBlocksByDate"
+  | "goalMemos"
+  | "workerPublishedDates"
 >;
 
 function serializePeriod(period: ShiftPeriod): PeriodRow {
@@ -50,8 +71,8 @@ function serializeDesiredShift(shift: DesiredShift): DesiredShiftInsert {
     staff_id: shift.staffId,
     period_id: shift.periodId,
     work_date: shift.date,
-    start_time: shift.startTime,
-    end_time: shift.endTime,
+    start_time: normalizeDisplayTime(shift.startTime),
+    end_time: normalizeDisplayTime(shift.endTime),
     break_minutes: shift.breakMinutes,
     actual_minutes: shift.actualMinutes,
     note: shift.note,
@@ -66,8 +87,8 @@ function deserializeDesiredShift(row: DesiredShiftRow): DesiredShift {
     staffId: row.staff_id,
     periodId: row.period_id,
     date: row.work_date,
-    startTime: row.start_time,
-    endTime: row.end_time,
+    startTime: normalizeDisplayTime(row.start_time),
+    endTime: normalizeDisplayTime(row.end_time),
     breakMinutes: row.break_minutes,
     actualMinutes: row.actual_minutes,
     note: row.note,
@@ -82,8 +103,8 @@ function serializeConfirmedShift(shift: ConfirmedShift): ConfirmedShiftInsert {
     period_id: shift.periodId,
     work_date: shift.date,
     status: shift.status,
-    start_time: shift.startTime,
-    end_time: shift.endTime,
+    start_time: normalizeDisplayTime(shift.startTime),
+    end_time: normalizeDisplayTime(shift.endTime),
     break_minutes: shift.breakMinutes,
     actual_minutes: shift.actualMinutes,
     note: shift.note,
@@ -101,8 +122,8 @@ function deserializeConfirmedShift(row: ConfirmedShiftRow): ConfirmedShift {
     periodId: row.period_id,
     date: row.work_date,
     status: row.status,
-    startTime: row.start_time,
-    endTime: row.end_time,
+    startTime: normalizeDisplayTime(row.start_time),
+    endTime: normalizeDisplayTime(row.end_time),
     breakMinutes: row.break_minutes,
     actualMinutes: row.actual_minutes,
     note: row.note,
@@ -304,11 +325,12 @@ export async function loadShiftSnapshotFromSupabase(
 
   if (needsFallbackSeed) {
     return {
-      ...fallback,
       period: deserializePeriod(periodRow),
-      desiredShifts: fallback.desiredShifts.map((shift) => ({ ...shift, periodId })),
-      confirmedShifts: fallback.confirmedShifts.map((shift) => ({ ...shift, periodId })),
-      requiredShifts: fallback.requiredShifts.map((item) => ({ ...item, periodId })),
+      desiredShifts: [],
+      confirmedShifts: [],
+      requiredShifts: [],
+      goalBlocksByDate: {},
+      goalMemos: [],
     };
   }
 
@@ -326,30 +348,70 @@ export async function persistShiftSnapshotToSupabase(
   supabase: SupabaseClient,
   snapshot: ShiftPersistenceSnapshot
 ): Promise<void> {
-  const { error: periodError } = await supabase.from("shift_periods").upsert(serializePeriod(snapshot.period), {
-    onConflict: "id",
-  });
+  const { periodId, period } = await resolveCanonicalPeriod(supabase, snapshot);
+  const normalizedSnapshot: ShiftPersistenceSnapshot = {
+    ...snapshot,
+    period: { ...period, id: periodId },
+    desiredShifts: snapshot.desiredShifts.map((shift) => ({ ...shift, periodId })),
+    confirmedShifts: snapshot.confirmedShifts.map((shift) => ({ ...shift, periodId })),
+    requiredShifts: snapshot.requiredShifts.map((shift) => ({ ...shift, periodId })),
+  };
+
+  const { error: periodError } = await supabase
+    .from("shift_periods")
+    .update({
+      adjustment_status: normalizedSnapshot.period.adjustmentStatus,
+      published_week_start_date: normalizedSnapshot.period.publishedWeekStartDate,
+      published_at: normalizedSnapshot.period.publishedAt,
+      updated_at: normalizedSnapshot.period.updatedAt,
+    })
+    .eq("id", periodId);
   if (periodError) throw periodError;
 
   const { data: departmentRows, error: departmentError } = await supabase.from("departments").select("id, name");
   if (departmentError) throw departmentError;
   const departmentIdByName = new Map((departmentRows ?? []).map((department: DepartmentRow) => [department.name, department.id]));
 
-  const goalBlocksRows = serializeGoalBlocks(snapshot.goalBlocksByDate, departmentIdByName);
-  const requiredRows = serializeRequiredShifts(snapshot, snapshot.goalBlocksByDate);
-  const goalMemoRows = snapshot.goalMemos.map((memo) => serializeGoalMemo(snapshot.period.id, memo));
-  const desiredRows = snapshot.desiredShifts.map(serializeDesiredShift);
-  const confirmedRows = snapshot.confirmedShifts.map(serializeConfirmedShift);
+  const goalBlocksRows = serializeGoalBlocks(normalizedSnapshot.goalBlocksByDate, departmentIdByName);
+  const requiredRows = serializeRequiredShifts(normalizedSnapshot, normalizedSnapshot.goalBlocksByDate);
+  const goalMemoRows = normalizedSnapshot.goalMemos.map((memo) => serializeGoalMemo(periodId, memo));
+  const desiredRows = normalizedSnapshot.desiredShifts.map(serializeDesiredShift);
+  const confirmedRows = normalizedSnapshot.confirmedShifts.map(serializeConfirmedShift);
+  const goalBlockDates = [
+    ...new Set([
+      ...Object.keys(normalizedSnapshot.goalBlocksByDate),
+      ...normalizedSnapshot.requiredShifts.map((shift) => shift.date),
+    ]),
+  ];
+
+  const { count: existingConfirmedCount, error: existingConfirmedError } = await supabase
+    .from("confirmed_shifts")
+    .select("*", { count: "exact", head: true })
+    .eq("period_id", periodId);
+  if (existingConfirmedError) throw existingConfirmedError;
+  if ((existingConfirmedCount ?? 0) > 0 && confirmedRows.length === 0) {
+    throw new Error(
+      "確定シフトが空の状態では保存できません。画面を再読み込みしてからやり直してください。"
+    );
+  }
 
   const deleteResults = await Promise.all([
-    supabase.from("desired_shifts").delete().eq("period_id", snapshot.period.id),
-    supabase.from("confirmed_shifts").delete().eq("period_id", snapshot.period.id),
-    supabase.from("required_shifts").delete().eq("period_id", snapshot.period.id),
-    supabase.from("goal_memos").delete().eq("period_id", snapshot.period.id),
-    supabase.from("goal_block_slots").delete(),
+    supabase.from("desired_shifts").delete().eq("period_id", periodId),
+    supabase.from("confirmed_shifts").delete().eq("period_id", periodId),
+    supabase.from("required_shifts").delete().eq("period_id", periodId),
+    supabase.from("goal_memos").delete().eq("period_id", periodId),
+    goalBlockDates.length > 0
+      ? supabase.from("goal_block_slots").delete().in("work_date", goalBlockDates)
+      : Promise.resolve({ error: null } as const),
   ]);
   const deleteError = deleteResults.find((result) => result.error)?.error;
-  if (deleteError) throw deleteError;
+  if (deleteError) {
+    throw new Error(deleteError.message || "既存シフトデータの削除に失敗しました。");
+  }
+
+  // unique (staff_id, work_date) は period を跨ぐため、挿入前に衝突行を除去
+  await deleteShiftStaffDateRows(supabase, "desired_shifts", desiredRows);
+  await deleteShiftStaffDateRows(supabase, "confirmed_shifts", confirmedRows);
 
   const insertResults = await Promise.all([
     desiredRows.length > 0 ? supabase.from("desired_shifts").insert(desiredRows) : Promise.resolve({ error: null } as const),
@@ -359,27 +421,322 @@ export async function persistShiftSnapshotToSupabase(
     goalMemoRows.length > 0 ? supabase.from("goal_memos").insert(goalMemoRows) : Promise.resolve({ error: null } as const),
   ]);
   const insertError = insertResults.find((result) => result.error)?.error;
-  if (insertError) throw insertError;
+  if (insertError) {
+    throw new Error(insertError.message || "シフトデータの保存に失敗しました。");
+  }
+}
+
+/** DB 上の最新 period に統一（クライアントの固定 ID と二重化しない） */
+async function resolveCanonicalPeriod(
+  supabase: SupabaseClient,
+  snapshot: ShiftPersistenceSnapshot
+): Promise<{ periodId: string; period: ShiftPeriod }> {
+  const { data: latestRow, error } = await supabase
+    .from("shift_periods")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+
+  if (latestRow) {
+    return {
+      periodId: latestRow.id,
+      period: {
+        ...deserializePeriod(latestRow),
+        adjustmentStatus: snapshot.period.adjustmentStatus,
+        publishedWeekStartDate: snapshot.period.publishedWeekStartDate,
+        publishedAt: snapshot.period.publishedAt,
+        updatedAt: snapshot.period.updatedAt,
+      },
+    };
+  }
+
+  const inserted = await supabase
+    .from("shift_periods")
+    .insert({
+      adjustment_status: snapshot.period.adjustmentStatus,
+      published_week_start_date: snapshot.period.publishedWeekStartDate,
+      published_at: snapshot.period.publishedAt,
+      created_at: snapshot.period.createdAt,
+      updated_at: snapshot.period.updatedAt,
+    })
+    .select("*")
+    .single();
+  if (inserted.error) throw inserted.error;
+  return { periodId: inserted.data.id, period: deserializePeriod(inserted.data) };
+}
+
+export function createEmptyShiftPersistenceFallback(): ShiftPersistenceSnapshot {
+  return {
+    period: {
+      id: "period-2026-08-10",
+      adjustmentStatus: "editing",
+      publishedWeekStartDate: null,
+      publishedAt: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+    desiredShifts: [],
+    confirmedShifts: [],
+    requiredShifts: [],
+    goalBlocksByDate: {},
+    goalMemos: [],
+  };
+}
+
+export function createEmptyAppState(): AppState {
+  return {
+    staffList: [],
+    departments: [],
+    homeMessages: [],
+    currentUserId: "",
+    ...createEmptyShiftPersistenceFallback(),
+  };
+}
+
+export type WorkerPublishContext = {
+  staffId: string;
+  workerTeam: string;
+  staffList: Pick<Staff, "id" | "role" | "status" | "team">[];
+  knownDepartments: ReadonlySet<string>;
+};
+
+export async function loadWorkerPublishContext(
+  supabase: SupabaseClient,
+  staffId: string
+): Promise<WorkerPublishContext> {
+  const [profilesResult, departmentsResult] = await Promise.all([
+    supabase.from("staff_profiles").select("id, role, status, department_id"),
+    supabase.from("departments").select("id, name"),
+  ]);
+  if (profilesResult.error) throw profilesResult.error;
+  if (departmentsResult.error) throw departmentsResult.error;
+
+  const departmentNameById = Object.fromEntries(
+    (departmentsResult.data ?? []).map((row) => [row.id, row.name])
+  );
+  const knownDepartments = new Set(Object.values(departmentNameById));
+  const staffList: Pick<Staff, "id" | "role" | "status" | "team">[] = (profilesResult.data ?? []).map(
+    (row) => ({
+      id: row.id,
+      role: row.role as Staff["role"],
+      status: row.status as Staff["status"],
+      team: row.department_id ? (departmentNameById[row.department_id] ?? "") : "",
+    })
+  );
+
+  const workerTeam = staffList.find((staff) => staff.id === staffId)?.team ?? "";
+
+  return { staffId, workerTeam, staffList, knownDepartments };
+}
+
+/** Auth ID と staff_profiles ID がズレている場合に、実データ側の ID を優先 */
+export function resolveWorkerStaffIdFromSnapshot(
+  snapshot: ShiftPersistenceSnapshot,
+  preferredIds: string[]
+): string {
+  for (const id of preferredIds) {
+    if (!id) continue;
+    const hasShiftData =
+      snapshot.desiredShifts.some((shift) => shift.staffId === id) ||
+      snapshot.confirmedShifts.some((shift) => shift.staffId === id);
+    if (hasShiftData) return id;
+  }
+  return preferredIds.find(Boolean) ?? "";
+}
+
+/** 所属の確定週（月〜金）に含まれる日付一覧 */
+export function buildWorkerPublishedDates(
+  snapshot: ShiftPersistenceSnapshot,
+  context: WorkerPublishContext
+): string[] {
+  return computeWorkerPublishedDates(
+    snapshot.period,
+    context.staffList,
+    snapshot.confirmedShifts,
+    context.staffId,
+    context.workerTeam,
+    { knownDepartments: context.knownDepartments }
+  );
+}
+
+function isWorkerDatePublished(
+  snapshot: ShiftPersistenceSnapshot,
+  context: WorkerPublishContext,
+  date: string
+): boolean {
+  return computeWorkerPublishedDates(
+    snapshot.period,
+    context.staffList,
+    snapshot.confirmedShifts,
+    context.staffId,
+    context.workerTeam,
+    { knownDepartments: context.knownDepartments }
+  ).includes(date);
+}
+
+function buildWorkerConfirmedShifts(
+  snapshot: ShiftPersistenceSnapshot,
+  context: WorkerPublishContext
+): ConfirmedShift[] {
+  const { staffId } = context;
+  const publishStamp = snapshot.period.publishedAt ?? new Date().toISOString();
+  const ownDesired = snapshot.desiredShifts.filter((shift) => shift.staffId === staffId);
+  const ownConfirmedRaw = snapshot.confirmedShifts.filter((shift) => shift.staffId === staffId);
+
+  return ownConfirmedRaw
+    .map((shift) => {
+      const publishedForWorker = isWorkerDatePublished(snapshot, context, shift.date);
+      let next = shift;
+      if (!shift.publishedAt && publishedForWorker) {
+        next = { ...shift, publishedAt: shift.updatedAt ?? publishStamp };
+      }
+      if (
+        next.publishedAt &&
+        next.status === "adjusting" &&
+        !hasWishChangedAfterPublish(next, ownDesired.find((desired) => desired.date === shift.date))
+      ) {
+        next = {
+          ...next,
+          status: isRestConfirmedShift(next) ? "unconfirmed" : "confirmed",
+        };
+      }
+      return next;
+    })
+    .filter((shift) => Boolean(shift.publishedAt))
+    .sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime));
+}
+
+/** アルバイト向け: 自分の希望 + 所属で確定公開済みの確定シフト */
+export function filterShiftSnapshotForWorker(
+  snapshot: ShiftPersistenceSnapshot,
+  context: WorkerPublishContext
+): ShiftPersistenceSnapshot {
+  const workerPublishedDates = buildWorkerPublishedDates(snapshot, context);
+  return {
+    ...snapshot,
+    desiredShifts: snapshot.desiredShifts.filter((shift) => shift.staffId === context.staffId),
+    confirmedShifts: buildWorkerConfirmedShifts(snapshot, context),
+    workerPublishedDates,
+  };
+}
+
+async function syncWorkerAdjustingConfirmedShifts(
+  supabase: SupabaseClient,
+  snapshot: ShiftPersistenceSnapshot,
+  staffId: string
+): Promise<void> {
+  const ownDesired = snapshot.desiredShifts.filter((shift) => shift.staffId === staffId);
+  const ownConfirmed = snapshot.confirmedShifts.filter(
+    (shift) => shift.staffId === staffId && Boolean(shift.publishedAt)
+  );
+
+  for (const confirmed of ownConfirmed) {
+    const desired = ownDesired.find((shift) => shift.date === confirmed.date);
+    const wishChanged = hasWishChangedAfterPublish(confirmed, desired);
+
+    if (wishChanged) {
+      const { error } = await supabase
+        .from("confirmed_shifts")
+        .update({
+          status: "adjusting",
+          updated_at: desired?.updatedAt ?? confirmed.updatedAt,
+        })
+        .eq("staff_id", staffId)
+        .eq("work_date", confirmed.date);
+      if (error) throw error;
+      continue;
+    }
+
+    if (confirmed.status === "adjusting" && !wishChanged) {
+      const nextStatus =
+        !desired || !confirmed.publishedAt || isRestConfirmedShift(confirmed)
+          ? "unconfirmed"
+          : "confirmed";
+      const { error } = await supabase
+        .from("confirmed_shifts")
+        .update({
+          status: nextStatus,
+          updated_at: confirmed.publishedAt ?? confirmed.updatedAt,
+        })
+        .eq("staff_id", staffId)
+        .eq("work_date", confirmed.date);
+      if (error) throw error;
+    }
+  }
 }
 
 export async function persistWorkerDesiredShiftsToSupabase(
   supabase: SupabaseClient,
   snapshot: ShiftPersistenceSnapshot,
   staffId: string
-): Promise<void> {
-  const desiredRows = snapshot.desiredShifts
-    .filter((shift) => shift.staffId === staffId)
-    .map(serializeDesiredShift);
+): Promise<string> {
+  const { periodId } = await resolveCanonicalPeriod(supabase, snapshot);
+  const ownDesired = snapshot.desiredShifts.filter((shift) => shift.staffId === staffId);
+  const desiredDates = new Set(ownDesired.map((shift) => shift.date));
 
-  const { error: deleteError } = await supabase
+  const { data: existingRows, error: existingError } = await supabase
     .from("desired_shifts")
-    .delete()
-    .eq("period_id", snapshot.period.id)
+    .select("work_date")
     .eq("staff_id", staffId);
-  if (deleteError) throw deleteError;
+  if (existingError) throw existingError;
 
-  if (desiredRows.length === 0) return;
-  const { error: insertError } = await supabase.from("desired_shifts").insert(desiredRows);
-  if (insertError) throw insertError;
+  const deleteDates = (existingRows ?? [])
+    .map((row) => row.work_date)
+    .filter((date) => !desiredDates.has(date));
+  if (deleteDates.length > 0) {
+    const { error: deleteRemovedError } = await supabase
+      .from("desired_shifts")
+      .delete()
+      .eq("staff_id", staffId)
+      .in("work_date", deleteDates);
+    if (deleteRemovedError) throw deleteRemovedError;
+
+    const { error: deleteDraftConfirmedError } = await supabase
+      .from("confirmed_shifts")
+      .delete()
+      .eq("staff_id", staffId)
+      .in("work_date", deleteDates)
+      .is("published_at", null);
+    if (deleteDraftConfirmedError) throw deleteDraftConfirmedError;
+  }
+
+  if (ownDesired.length > 0) {
+    const desiredRows = ownDesired.map((shift) => ({
+      ...serializeDesiredShift({ ...shift, staffId, periodId }),
+      staff_id: staffId,
+      period_id: periodId,
+    }));
+    const { error: upsertError } = await supabase
+      .from("desired_shifts")
+      .upsert(desiredRows, { onConflict: "staff_id,work_date" });
+    if (upsertError) throw upsertError;
+  }
+
+  await syncWorkerAdjustingConfirmedShifts(supabase, snapshot, staffId);
+  return periodId;
+}
+
+type ShiftStaffDateRow = { staff_id: string; work_date: string };
+
+async function deleteShiftStaffDateRows(
+  supabase: SupabaseClient,
+  table: "desired_shifts" | "confirmed_shifts",
+  rows: ShiftStaffDateRow[]
+): Promise<void> {
+  const uniqueKeys = new Map<string, ShiftStaffDateRow>();
+  for (const row of rows) {
+    uniqueKeys.set(`${row.staff_id}:${row.work_date}`, row);
+  }
+  if (uniqueKeys.size === 0) return;
+
+  const results = await Promise.all(
+    Array.from(uniqueKeys.values()).map((row) =>
+      supabase.from(table).delete().eq("staff_id", row.staff_id).eq("work_date", row.work_date)
+    )
+  );
+  const error = results.find((result) => result.error)?.error;
+  if (error) throw error;
 }
 

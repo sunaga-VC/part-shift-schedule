@@ -59,19 +59,27 @@ export function LoginForm() {
         setLoading(false);
         return;
       }
-
-      const { data: profile, error: profileError } = await supabase
-        .from("staff_profiles")
-        .select("id, last_name, role, admin_permission, status")
-        .eq("id", user.id)
-        .maybeSingle();
-
-      if (profileError) {
-        setError(`プロフィール取得に失敗しました: ${profileError.message}`);
+      const userEmail = user.email?.trim().toLowerCase();
+      if (!userEmail) {
+        setError("このアカウントにはメールアドレスがありません。");
         setLoading(false);
         return;
       }
-      if (!profile) {
+
+      const bootstrapResponse = await fetch("/api/bootstrap/staff", { method: "GET", credentials: "same-origin" });
+      if (!bootstrapResponse.ok) {
+        const payload = (await bootstrapResponse.json().catch(() => null)) as { message?: string } | null;
+        setError(payload?.message ?? "プロフィール取得に失敗しました。");
+        setLoading(false);
+        return;
+      }
+      const payload = (await bootstrapResponse.json()) as {
+        ok?: boolean;
+        bootstrap?: { userId: string; staffList: Array<{ id: string; role: string; adminPermission: string; status: string }> };
+      };
+      const bootstrap = payload.bootstrap;
+      const profile = bootstrap?.staffList.find((staff) => staff.id === bootstrap.userId);
+      if (!bootstrap || !profile) {
         setError("staff_profiles にこのユーザーの行がありません。");
         setLoading(false);
         return;
@@ -88,7 +96,7 @@ export function LoginForm() {
       let destination = "/";
       if (profile.role === "admin") {
         const canAccessMaster =
-          profile.admin_permission === "manager" || profile.admin_permission === "part_time_admin";
+          profile.adminPermission === "manager" || profile.adminPermission === "part_time_admin";
         if (requestedNext.startsWith("/admin/master") && canAccessMaster) {
           destination = requestedNext;
         } else if (requestedNext.startsWith("/admin")) {

@@ -2,14 +2,13 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useShift } from "@/context/ShiftContext";
+import { useShift } from "@/components/context/ShiftContext";
 
 export function AdminAccount() {
-  const { state, updateStaff, changeStaffPassword } = useShift();
-  const admin = state.staffList.find((staff) => staff.role === "admin");
+  const { updateStaff, changeStaffPassword, currentUser } = useShift();
   const [passwordDraft, setPasswordDraft] = useState("");
 
-  if (!admin) {
+  if (!currentUser || currentUser.role !== "admin") {
     return (
       <div className="panel">
         <p>管理者アカウントが見つかりません。</p>
@@ -19,6 +18,8 @@ export function AdminAccount() {
       </div>
     );
   }
+
+  const admin = currentUser;
 
   return (
     <div className="stack">
@@ -36,6 +37,10 @@ export function AdminAccount() {
 
       <section className="panel stack">
         <div className="form-grid master-form-grid">
+          <label>
+            メール（ログインID）
+            <input value={admin.email} readOnly />
+          </label>
           <label>
             名前
             <input value={admin.name} onChange={(e) => updateStaff(admin.id, { name: e.target.value })} />
