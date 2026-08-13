@@ -1,10 +1,10 @@
 "use client";
 
-import { useMemo, useState, useEffect } from "react";
+import { memo, useCallback, useDeferredValue, useMemo, useState, useEffect } from "react";
 import { CalendarNavToolbar } from "@/components/CalendarNavToolbar";
 import { WorkerShiftHeader } from "@/components/WorkerShiftHeader";
 import { Icons } from "@/components/icons";
-import { useShift } from "@/components/context/ShiftContext";
+import { useShift, useShiftAuth } from "@/components/context/ShiftContext";
 import { useWorkCalendarNavigation } from "@/hooks/useWorkCalendarNavigation";
 import { formatDateLong, formatDateShort } from "@/lib/shift/dates";
 import { getStaffDisplayName } from "@/lib/shift/display";
@@ -18,17 +18,59 @@ import {
   formatTimeRange,
   getWorkerShiftTimeOptions,
 } from "@/lib/shift/time";
+import type { ConfirmedShift, DesiredShift } from "@/lib/shift/types";
+
+type WishCalendarDayCellData = {
+  wishCount: number;
+  timeLabel: string;
+  timeClassName: string;
+  cellStatusClass: string;
+};
+
+const WishCalendarDayCell = memo(function WishCalendarDayCell({
+  date,
+  weekIndex,
+  currentWeekIndex,
+  selected,
+  data,
+  onSelectDate,
+}: {
+  date: string;
+  weekIndex: number;
+  currentWeekIndex: number;
+  selected: boolean;
+  data: WishCalendarDayCellData;
+  onSelectDate: (date: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`day-cell${selected ? " selected" : ""}${weekIndex < currentWeekIndex ? " past" : ""}${data.cellStatusClass}`}
+      onClick={() => onSelectDate(date)}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          width: "100%",
+        }}
+      >
+        <div className="day-num">{formatDateShort(date)}</div>
+        <span className="day-meta" style={{ marginTop: 0, whiteSpace: "nowrap" }}>
+          希望 {data.wishCount}人
+        </span>
+      </div>
+      <div className="day-meta">
+        <span className={data.timeClassName}>{data.timeLabel}</span>
+      </div>
+    </button>
+  );
+});
 
 export function WishCalendarPage() {
-  const {
-    state,
-    currentUser,
-    isAdmin,
-    workers,
-    upsertDesiredShift,
-    deleteDesiredShift,
-    flushShiftPersist,
-  } = useShift();
+  const { state, upsertDesiredShift, deleteDesiredShift, flushShiftPersist } = useShift();
+  const { currentUser, isAdmin, workers } = useShiftAuth();
 
   const {
     defaultSelectedDateKey,
@@ -43,6 +85,15 @@ export function WishCalendarPage() {
     handleChangeYear,
   } = useWorkCalendarNavigation();
   const [selectedDate, setSelectedDate] = useState(defaultSelectedDateKey);
+  const detailDate = useDeferredValue(selectedDate);
+  const handleSelectCalendarDate = useCallback((date: string) => {
+    setSelectedDate(date);
+    setEditing(false);
+    setMessage(null);
+    if (!isAdmin && currentUser?.role === "worker") {
+      setDetailOpen(true);
+    }
+  }, [currentUser?.role, isAdmin]);
   const [detailOpen, setDetailOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [startTime, setStartTime] = useState("10:00");
@@ -72,42 +123,120 @@ export function WishCalendarPage() {
     return Array.from(new Set([...(workerPublishedDates ?? []), ...stickyPublishedDates])).sort();
   }, [isWorkerView, workerPublishedDates, stickyPublishedDates]);
 
-  function isWorkerPublishedDate(date: string) {
-    if (effectiveWorkerPublishedDates.includes(date)) return true;
-    return isWorkerCalendarDatePublished(
-      date,
-      workerPublishedDates,
-      state.period,
-      state.staffList,
-      state.confirmedShifts,
-      currentUser?.team ?? "",
-      currentUser?.id ?? "",
-      { knownDepartments }
-    );
-  }
+  const calendarDates = useMemo(() => weekGroups.flat(), [weekGroups]);
+  const workerCalendarCells = useMemo(() => {
+    const wishCountByDate = new Map<string, number>();
+    const myWishByDate = new Map<string, DesiredShift>();
+    const myConfirmedByDate = new Map<string, ConfirmedShift>();
+    const currentUserId = currentUser?.id;
+
+    for (const shift of state.desiredShifts) {
+      wishCountByDate.set(shift.date, (wishCountByDate.get(shift.date) ?? 0) + 1);
+      if (currentUserId && shift.staffId === currentUserId) {
+        myWishByDate.set(shift.date, shift);
+      }
+    }
+    if (currentUserId) {
+      for (const shift of state.confirmedShifts) {
+        if (shift.staffId === currentUserId) {
+          myConfirmedByDate.set(shift.date, shift);
+        }
+      }
+    }
+
+    const cells = new Map<string, WishCalendarDayCellData>();
+    for (const date of calendarDates) {
+      const mine = currentUserId ? myWishByDate.get(date) : undefined;
+      const confirmedShift = currentUserId ? myConfirmedByDate.get(date) : undefined;
+      const isPublishedDate = isWorkerView
+        ? effectiveWorkerPublishedDates.includes(date) ||
+          isWorkerCalendarDatePublished(
+            date,
+            workerPublishedDates,
+            state.period,
+            state.staffList,
+            state.confirmedShifts,
+            currentUser?.team ?? "",
+            currentUserId ?? "",
+            { knownDepartments }
+          )
+        : isWorkerCalendarDatePublished(
+            date,
+            workerPublishedDates,
+            state.period,
+            state.staffList,
+            state.confirmedShifts,
+            currentUser?.team ?? "",
+            currentUserId ?? "",
+            { knownDepartments }
+          );
+      const isPendingAdjustment =
+        !isWorkerView &&
+        hasStaffPendingAdjustment(
+          state.period,
+          confirmedShift,
+          mine,
+          date,
+          workerPublishedDates
+        );
+      const display = resolveWorkerShiftDisplay(
+        state.period,
+        confirmedShift,
+        mine,
+        date,
+        isWorkerView ? effectiveWorkerPublishedDates : workerPublishedDates
+      );
+      let timeLabel = "設定なし";
+      let timeClassName = "muted";
+      if (display.kind === "rest") {
+        timeLabel = "休み";
+      } else if (display.kind === "confirmed") {
+        timeLabel = formatTimeRange(display.shift.startTime, display.shift.endTime);
+        timeClassName = "published-time";
+      } else if (display.kind === "wish") {
+        timeLabel = formatTimeRange(display.shift.startTime, display.shift.endTime);
+        timeClassName = "wish-edited-time";
+      } else if (display.pending) {
+        timeLabel = "設定なし";
+        timeClassName = "wish-edited-time";
+      }
+      const cellStatusClass = isWorkerView
+        ? isPublishedDate
+          ? " published-date"
+          : ""
+        : isPendingAdjustment
+          ? " pending-adjustment-date"
+          : isPublishedDate
+            ? " published-date"
+            : "";
+      cells.set(date, {
+        wishCount: wishCountByDate.get(date) ?? 0,
+        timeLabel,
+        timeClassName,
+        cellStatusClass,
+      });
+    }
+    return cells;
+  }, [
+    calendarDates,
+    currentUser?.id,
+    currentUser?.team,
+    effectiveWorkerPublishedDates,
+    isWorkerView,
+    knownDepartments,
+    state.confirmedShifts,
+    state.desiredShifts,
+    state.period,
+    state.staffList,
+    workerPublishedDates,
+  ]);
 
   const myWish = state.desiredShifts.find(
-    (s) => s.staffId === currentUser?.id && s.date === selectedDate
+    (s) => s.staffId === currentUser?.id && s.date === detailDate
   );
   const selectedDateConfirmedShift = state.confirmedShifts.find(
-    (s) => s.staffId === currentUser?.id && s.date === selectedDate
+    (s) => s.staffId === currentUser?.id && s.date === detailDate
   );
-
-  function isPublishedCalendarDate(date: string) {
-    if (isWorkerView) {
-      return isWorkerPublishedDate(date);
-    }
-    return isWorkerCalendarDatePublished(
-      date,
-      workerPublishedDates,
-      state.period,
-      state.staffList,
-      state.confirmedShifts,
-      currentUser?.team ?? "",
-      currentUser?.id ?? "",
-      { knownDepartments }
-    );
-  }
 
   function resolveCalendarShiftDisplay(
     date: string,
@@ -124,39 +253,10 @@ export function WishCalendarPage() {
   }
 
   const selectedDateDisplay = resolveCalendarShiftDisplay(
-    selectedDate,
+    detailDate,
     selectedDateConfirmedShift,
     myWish
   );
-
-  function renderDayTime(
-    date: string,
-    mine: typeof myWish,
-    confirmedShift: typeof selectedDateConfirmedShift
-  ) {
-    const display = resolveCalendarShiftDisplay(date, confirmedShift, mine);
-    if (display.kind === "rest") {
-      return <span className="muted">休み</span>;
-    }
-    if (display.kind === "confirmed") {
-      return (
-        <span className="published-time">
-          {formatTimeRange(display.shift.startTime, display.shift.endTime)}
-        </span>
-      );
-    }
-    if (display.kind === "wish") {
-      return (
-        <span className="wish-edited-time">
-          {formatTimeRange(display.shift.startTime, display.shift.endTime)}
-        </span>
-      );
-    }
-    if (display.pending) {
-      return <span className="wish-edited-time">設定なし</span>;
-    }
-    return <span className="muted">設定なし</span>;
-  }
 
   function renderSelfTimeLabel() {
     if (selectedDateDisplay.kind === "rest") return "休み";
@@ -180,7 +280,7 @@ export function WishCalendarPage() {
 
   const dayWishes = useMemo(() => {
     return state.desiredShifts
-      .filter((s) => s.date === selectedDate)
+      .filter((s) => s.date === detailDate)
       .map((s) => ({
         shift: s,
         staff: workers.find((w) => w.id === s.staffId) ?? state.staffList.find((w) => w.id === s.staffId && w.status === "active"),
@@ -192,22 +292,13 @@ export function WishCalendarPage() {
         }
         return getStaffDisplayName(a.staff).localeCompare(getStaffDisplayName(b.staff), "ja");
       });
-  }, [selectedDate, state.desiredShifts, state.staffList, workers]);
+  }, [detailDate, state.desiredShifts, state.staffList, workers]);
 
   const editable = isWorkerView;
   const timeOptions = useMemo(
     () => getWorkerShiftTimeOptions(Boolean(currentUser?.socialInsurance)),
     [currentUser?.socialInsurance]
   );
-
-  function selectDate(date: string) {
-    setSelectedDate(date);
-    setEditing(false);
-    setMessage(null);
-    if (isWorkerView) {
-      setDetailOpen(true);
-    }
-  }
 
   function closeDetail() {
     setDetailOpen(false);
@@ -266,12 +357,7 @@ export function WishCalendarPage() {
 
   const handleGoToday = () => {
     goToTodayWeek((dateKey) => {
-      setSelectedDate(dateKey);
-      setEditing(false);
-      setMessage(null);
-      if (isWorkerView) {
-        setDetailOpen(true);
-      }
+      handleSelectCalendarDate(dateKey);
     });
   };
 
@@ -420,56 +506,18 @@ export function WishCalendarPage() {
                   data-week-index={weekIndex}
                 >
                   {group.map((date) => {
-                    const count = state.desiredShifts.filter((s) => s.date === date).length;
-                    const mine = state.desiredShifts.find(
-                      (s) => s.staffId === currentUser?.id && s.date === date
-                    );
-                    const confirmedShift = state.confirmedShifts.find(
-                      (s) => s.staffId === currentUser?.id && s.date === date
-                    );
-                    const isPublishedDate = isPublishedCalendarDate(date);
-                    const isPendingAdjustment =
-                      !isWorkerView &&
-                      hasStaffPendingAdjustment(
-                        state.period,
-                        confirmedShift,
-                        mine,
-                        date,
-                        workerPublishedDates
-                      );
-                    const dateCellStatusClass = isWorkerView
-                      ? isPublishedDate
-                        ? " published-date"
-                        : ""
-                      : isPendingAdjustment
-                        ? " pending-adjustment-date"
-                        : isPublishedDate
-                          ? " published-date"
-                          : "";
+                    const cellData = workerCalendarCells.get(date);
+                    if (!cellData) return null;
                     return (
-                      <button
+                      <WishCalendarDayCell
                         key={date}
-                        type="button"
-                        className={`day-cell${selectedDate === date ? " selected" : ""}${
-                          weekIndex < currentWeekIndex ? " past" : ""
-                        }${dateCellStatusClass}`}
-                        onClick={() => selectDate(date)}
-                      >
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "flex-start",
-                            width: "100%",
-                          }}
-                        >
-                          <div className="day-num">{formatDateShort(date)}</div>
-                          <span className="day-meta" style={{ marginTop: 0, whiteSpace: "nowrap" }}>
-                            希望 {count}人
-                          </span>
-                        </div>
-                        <div className="day-meta">{renderDayTime(date, mine, confirmedShift)}</div>
-                      </button>
+                        date={date}
+                        weekIndex={weekIndex}
+                        currentWeekIndex={currentWeekIndex}
+                        selected={selectedDate === date}
+                        data={cellData}
+                        onSelectDate={handleSelectCalendarDate}
+                      />
                     );
                   })}
                 </div>

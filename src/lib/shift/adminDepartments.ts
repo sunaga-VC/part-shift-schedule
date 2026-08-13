@@ -1,4 +1,4 @@
-import type { Staff } from "@/lib/shift/types";
+import type { AdminPermission, Staff } from "@/lib/shift/types";
 import { isFixedDepartmentName } from "@/lib/shift/goal";
 
 /** UI・権限判定から除外する旧「本部」 */
@@ -23,22 +23,28 @@ export function listOperableDepartmentNames(departments: string[]): string[] {
 
 /**
  * 管理者が操作できる所属。
- * managedTeams に設定された所属のみ（未設定なら操作不可）。
+ * - マネージャー: 全所属（managedTeams 未設定時も可）
+ * - それ以外: managedTeams に設定された所属のみ
  */
 export function getManagedDepartmentsForAdmin(
-  admin: Pick<Staff, "role" | "managedTeams"> | undefined | null,
+  admin: Pick<Staff, "role" | "managedTeams" | "adminPermission"> | undefined | null,
   departments: string[]
 ): string[] {
   if (!admin || admin.role !== "admin") return [];
-  const allowed = new Set(listOperableDepartmentNames(departments));
+  const allowed = listOperableDepartmentNames(departments);
+  const allowedSet = new Set(allowed);
+  if (admin.adminPermission === "manager") {
+    const managed = (admin.managedTeams ?? []).filter((team) => allowedSet.has(team));
+    return managed.length > 0 ? managed : allowed;
+  }
   return (admin.managedTeams ?? [])
-    .filter((team) => allowed.has(team))
+    .filter((team) => allowedSet.has(team))
     .slice()
     .sort(compareDepartmentsForDisplay);
 }
 
 export function canOperateDepartment(
-  admin: Pick<Staff, "role" | "managedTeams"> | undefined | null,
+  admin: Pick<Staff, "role" | "managedTeams" | "adminPermission"> | undefined | null,
   department: string,
   departments: string[]
 ): boolean {

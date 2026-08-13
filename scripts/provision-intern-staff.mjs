@@ -33,19 +33,19 @@ if (!url || !key) {
 
 /** @type {const} */
 const STAFF = [
-  { lastName: "伊藤", firstName: "咲夢", email: "vegeintern01@vegecoop.co.jp", password: "vegepart@01" },
-  { lastName: "塚田", firstName: "真希仁", email: "vegeintern11@vegecoop.co.jp", password: "vegeintern@11" },
-  { lastName: "火ノ口", firstName: "紗彩和", email: "vegeintern25@vegecoop.co.jp", password: "vegepart@25" },
-  { lastName: "小森", firstName: "まな", email: "vegeintern14@vegecoop.co.jp", password: "vegepart@14" },
-  { lastName: "中城", firstName: "杏", email: "vegeintern24@vegecoop.co.jp", password: "vegepart@24" },
-  { lastName: "島田", firstName: "陽大", email: "vegeintern27@vegecoop.co.jp", password: "vegepart@27" },
-  { lastName: "本多", firstName: "陽向", email: "vegeintern28@vegecoop.co.jp", password: "vegepart@28" },
-  { lastName: "嘉本", firstName: "有恭", email: "vegeintern29@vegecoop.co.jp", password: "vegepart@29" },
-  { lastName: "阿部", firstName: "優正", email: "vegeintern30@vegecoop.co.jp", password: "vegepart@30" },
-  { lastName: "渡邉", firstName: "琴実", email: "vegeintern31@vegecoop.co.jp", password: "vegepart@31" },
+  { lastName: "伊藤", firstName: "咲夢", email: "vegeintern01@vegecoop.co.jp", password: "vegepart@01", department: "リクルーティング" },
+  { lastName: "塚田", firstName: "真希仁", email: "vegeintern11@vegecoop.co.jp", password: "vegeintern@11", department: "リクルーティング" },
+  { lastName: "火ノ口", firstName: "紗彩和", email: "vegeintern25@vegecoop.co.jp", password: "vegepart@25", department: "リクルーティング" },
+  { lastName: "小森", firstName: "まな", email: "vegeintern14@vegecoop.co.jp", password: "vegepart@14", department: "リクルーティング" },
+  { lastName: "中城", firstName: "杏", email: "vegeintern24@vegecoop.co.jp", password: "vegepart@24", department: "リクルーティング" },
+  { lastName: "島田", firstName: "陽大", email: "vegeintern27@vegecoop.co.jp", password: "vegepart@27", department: "リクルーティング" },
+  { lastName: "本多", firstName: "陽向", email: "vegeintern28@vegecoop.co.jp", password: "vegepart@28", department: "リクルーティング" },
+  { lastName: "嘉本", firstName: "有恭", email: "vegeintern29@vegecoop.co.jp", password: "vegepart@29", department: "リクルーティング" },
+  { lastName: "阿部", firstName: "優正", email: "vegeintern30@vegecoop.co.jp", password: "vegepart@30", department: "リクルーティング" },
+  { lastName: "渡邉", firstName: "琴実", email: "vegeintern31@vegecoop.co.jp", password: "vegepart@31", department: "リクルーティング" },
+  { lastName: "原", firstName: "亜沙美", email: "vegeintern04@vegecoop.co.jp", password: "vegepart@04", department: "業務" },
+  { lastName: "宮﨑", firstName: "莉理子", email: "vegeintern32@vegecoop.co.jp", password: "vegepart@32", department: "業務" },
 ];
-
-const DEPARTMENT_NAME = "リクルーティング";
 
 const service = createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
 const anon = createClient(url, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? key, {
@@ -66,15 +66,48 @@ async function findAuthUserByEmail(email) {
   return null;
 }
 
-async function getDepartmentId(name) {
+async function ensureDepartmentId(name) {
   const { data, error } = await service.from("departments").select("id").eq("name", name).maybeSingle();
   if (error) throw error;
-  return data?.id ?? null;
+  if (data?.id) return data.id;
+
+  const { data: created, error: insertError } = await service
+    .from("departments")
+    .insert({ name, is_fixed: false, sort_order: 99 })
+    .select("id")
+    .single();
+  if (insertError) {
+    if (insertError.code === "23505") {
+      const { data: retry, error: retryError } = await service
+        .from("departments")
+        .select("id")
+        .eq("name", name)
+        .maybeSingle();
+      if (retryError) throw retryError;
+      if (retry?.id) return retry.id;
+    }
+    throw insertError;
+  }
+  return created.id;
+}
+
+function profilePayload(member, departmentId) {
+  return {
+    last_name: member.lastName,
+    first_name: member.firstName,
+    display_given_name: false,
+    icon_label: member.lastName.slice(0, 1),
+    department_id: departmentId,
+    role: "worker",
+    admin_permission: "general",
+    status: "active",
+    weekly_contract_hours: 20,
+    social_insurance: false,
+    contract_renewal_months: 3,
+  };
 }
 
 async function ensureStaff(member, departmentId) {
-  const email = member.email.toLowerCase();
-
   const { data: existingProfile } = await service
     .from("staff_profiles")
     .select("id, email, last_name, first_name, role, department_id, social_insurance")
@@ -84,25 +117,14 @@ async function ensureStaff(member, departmentId) {
   if (existingProfile) {
     const { error: updateError } = await service
       .from("staff_profiles")
-      .update({
-        last_name: member.lastName,
-        first_name: member.firstName,
-        display_given_name: true,
-        icon_label: member.lastName.slice(0, 1),
-        department_id: departmentId,
-        role: "worker",
-        admin_permission: "general",
-        status: "active",
-        weekly_contract_hours: 20,
-        social_insurance: false,
-        contract_renewal_months: 3,
-      })
+      .update(profilePayload(member, departmentId))
       .eq("id", existingProfile.id);
     if (updateError) throw updateError;
 
     const authUser = await findAuthUserByEmail(member.email);
     if (authUser) {
       const { error: authUpdateError } = await service.auth.admin.updateUserById(authUser.id, {
+        email: member.email,
         password: member.password,
         email_confirm: true,
       });
@@ -117,18 +139,12 @@ async function ensureStaff(member, departmentId) {
     }
 
     const { data: created, error: createError } = await service.auth.admin.createUser({
+      id: existingProfile.id,
       email: member.email,
       password: member.password,
       email_confirm: true,
     });
     if (createError || !created.user) throw createError ?? new Error("Auth create failed");
-    if (created.user.id !== existingProfile.id) {
-      await service.auth.admin.deleteUser(created.user.id);
-      return {
-        status: "skipped_mismatch",
-        message: `${member.lastName} ${member.firstName}: 既存 profile ID と新規 Auth ID が一致しません`,
-      };
-    }
     return { status: "updated_auth", email: member.email, name: `${member.lastName} ${member.firstName}` };
   }
 
@@ -159,17 +175,7 @@ async function ensureStaff(member, departmentId) {
   const { error: profileError } = await service.from("staff_profiles").insert({
     id: created.user.id,
     email: member.email,
-    last_name: member.lastName,
-    first_name: member.firstName,
-    display_given_name: true,
-    icon_label: member.lastName.slice(0, 1),
-    department_id: departmentId,
-    role: "worker",
-    admin_permission: "general",
-    status: "active",
-    weekly_contract_hours: 20,
-    social_insurance: false,
-    contract_renewal_months: 3,
+    ...profilePayload(member, departmentId),
     hourly_wage: 0,
     google_email: "",
     note: "",
@@ -191,14 +197,24 @@ async function verifyLogin(email, password) {
 }
 
 async function main() {
-  const departmentId = await getDepartmentId(DEPARTMENT_NAME);
-  if (!departmentId) {
-    console.error(`所属「${DEPARTMENT_NAME}」が見つかりません。`);
-    process.exit(1);
+  const departmentIds = new Map();
+  for (const name of new Set(STAFF.map((member) => member.department))) {
+    departmentIds.set(name, await ensureDepartmentId(name));
+    console.log(JSON.stringify({ department: name, departmentId: departmentIds.get(name) }));
   }
 
   const results = [];
   for (const member of STAFF) {
+    const departmentId = departmentIds.get(member.department);
+    if (!departmentId) {
+      results.push({
+        status: "error",
+        email: member.email,
+        name: `${member.lastName} ${member.firstName}`,
+        message: `所属「${member.department}」が見つかりません`,
+      });
+      continue;
+    }
     try {
       const result = await ensureStaff(member, departmentId);
       results.push(result);

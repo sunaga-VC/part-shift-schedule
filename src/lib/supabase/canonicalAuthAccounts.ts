@@ -8,7 +8,7 @@ export const CANONICAL_AUTH_ACCOUNTS = [
   {
     loginEmail: "recruiting@example.co.jp",
     password: "admin01",
-    matchEmails: ["vegeintern01@vegecoop.co.jp", "recruiting@example.co.jp"],
+    matchEmails: ["recruiting@example.co.jp"],
   },
   {
     loginEmail: "j_kyo@vegecoop.co.jp",

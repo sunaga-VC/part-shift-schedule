@@ -64,46 +64,97 @@ export type StaffBootstrap = {
   staffList: Staff[];
 };
 
+type StaffBootstrapServiceClient = {
+  from: SupabaseClient["from"];
+};
+
+type DepartmentBootstrapRow = Pick<DepartmentRow, "id" | "name" | "sort_order">;
+
+/** service role 経由で staff / departments 一覧を取得 */
+export async function loadStaffBootstrapFromService(
+  service: StaffBootstrapServiceClient,
+  authUserId: string,
+  authEmail: string,
+  preloadedDepartments?: DepartmentBootstrapRow[]
+): Promise<StaffBootstrap | null> {
+  const departmentResult = preloadedDepartments
+    ? { data: preloadedDepartments, error: null as null }
+    : await service
+        .from("departments")
+        .select("id, name, sort_order")
+        .order("sort_order", { ascending: true });
+  if (departmentResult.error) {
+    throw new Error(departmentResult.error.message);
+  }
+
+  const profileResult = await service.from("staff_profiles").select("*, salary_raises(*)");
+  if (profileResult.error) {
+    throw new Error(profileResult.error.message);
+  }
+
+  const managedResult = await service.from("staff_managed_departments").select("staff_id, department_id");
+  if (managedResult.error) {
+    console.warn("staff_managed_departments fetch failed", managedResult.error.message);
+  }
+
+  const departmentRows = departmentResult.data ?? [];
+  const departmentNameById = Object.fromEntries(departmentRows.map((d) => [d.id, d.name]));
+  const managedTeamsByStaffId = new Map<string, string[]>();
+  for (const row of managedResult.data ?? []) {
+    const name = departmentNameById[row.department_id];
+    if (!name) continue;
+    const list = managedTeamsByStaffId.get(row.staff_id) ?? [];
+    list.push(name);
+    managedTeamsByStaffId.set(row.staff_id, list);
+  }
+
+  const rows = profileResult.data ?? [];
+  const normalizedEmail = authEmail.trim().toLowerCase();
+  let rawCurrent = rows.find((row) => row.id === authUserId);
+  if (!rawCurrent && normalizedEmail) {
+    rawCurrent = rows.find((row) => (row.email ?? "").toLowerCase() === normalizedEmail);
+  }
+  if (!rawCurrent) return null;
+
+  const staffList = rows.map((row) =>
+    mapStaffProfile(row as ProfileWithRaises, departmentNameById, managedTeamsByStaffId.get(row.id) ?? [])
+  );
+  const current = mapStaffProfile(
+    rawCurrent as ProfileWithRaises,
+    departmentNameById,
+    managedTeamsByStaffId.get(rawCurrent.id) ?? []
+  );
+
+  return {
+    userId: current.id,
+    departments: departmentRows.map((d) => d.name).filter((name) => name !== "本部"),
+    staffList,
+  };
+}
+
 /** ログイン中ユーザー向けに departments / staff_profiles を取得 */
 export async function fetchStaffBootstrap(
   supabase: SupabaseClient,
   options?: { attempts?: number; signOutOnAuthFailure?: boolean }
 ): Promise<StaffBootstrap | null> {
-  const attempts = Math.max(1, options?.attempts ?? 3);
+  const attempts = Math.max(1, options?.attempts ?? 2);
   const signOutOnAuthFailure = options?.signOutOnAuthFailure ?? false;
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (attempt > 0) {
-      await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+      await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
     }
-
-    const {
-      data: { user },
-      error: userError,
-    } = await supabase.auth.getUser();
-    if (userError) {
-      const code = userError.code ?? "";
-      const message = userError.message ?? "";
-      if (
-        signOutOnAuthFailure &&
-        (code === "refresh_token_not_found" ||
-          code === "session_not_found" ||
-          message.includes("Refresh Token"))
-      ) {
-        await supabase.auth.signOut({ scope: "local" });
-      }
-      return null;
-    }
-    const email = user?.email?.trim().toLowerCase();
-    if (!email) return null;
 
     const response = await fetch("/api/bootstrap/staff", {
       method: "GET",
       credentials: "same-origin",
       cache: "no-store",
+      signal: AbortSignal.timeout(15000),
     });
     if (response.status === 401 || response.status === 403) {
-      // ログイン直後は Cookie 反映前で 401 になることがあるため、即 signOut しない
+      if (signOutOnAuthFailure && attempt === attempts - 1) {
+        await supabase.auth.signOut({ scope: "local" });
+      }
       continue;
     }
     if (!response.ok) {

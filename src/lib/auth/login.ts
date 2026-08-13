@@ -1,14 +1,10 @@
-"use server";
-
-import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { getServiceClient, resolveStaffProfileForAuthUser } from "@/lib/supabase/adminApi";
 import { normalizeEmailInput } from "@/lib/shift/email";
 
-export type LoginActionState = {
-  error?: string;
-  redirectTo?: string;
-};
+export type LoginResult =
+  | { ok: true; redirectTo: string }
+  | { ok: false; error: string };
 
 function resolveDestination(input: {
   next: string;
@@ -27,16 +23,17 @@ function resolveDestination(input: {
   return "/shift";
 }
 
-export async function loginAction(
-  _prevState: LoginActionState | null,
-  formData: FormData
-): Promise<LoginActionState> {
-  const email = normalizeEmailInput(String(formData.get("email") ?? ""));
-  const password = String(formData.get("password") ?? "");
-  const next = String(formData.get("next") ?? "").trim();
+export async function performLogin(input: {
+  email: string;
+  password: string;
+  next?: string;
+}): Promise<LoginResult> {
+  const email = normalizeEmailInput(input.email);
+  const password = input.password;
+  const next = (input.next ?? "").trim();
 
   if (!email || !password) {
-    return { error: "メールアドレスとパスワードを入力してください。" };
+    return { ok: false, error: "メールアドレスとパスワードを入力してください。" };
   }
 
   const supabase = await createClient();
@@ -44,6 +41,7 @@ export async function loginAction(
   const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({ email, password });
   if (signInError) {
     return {
+      ok: false,
       error:
         signInError.message === "Invalid login credentials"
           ? "メールまたはパスワードが正しくありません。"
@@ -53,19 +51,20 @@ export async function loginAction(
 
   const user = signInData.user;
   if (!user) {
-    return { error: "ログインに失敗しました。" };
+    return { ok: false, error: "ログインに失敗しました。" };
   }
 
   const userEmail = user.email?.trim().toLowerCase() ?? "";
   if (!userEmail) {
     await supabase.auth.signOut();
-    return { error: "このアカウントにはメールアドレスがありません。" };
+    return { ok: false, error: "このアカウントにはメールアドレスがありません。" };
   }
 
   const service = getServiceClient();
   if (!service) {
     await supabase.auth.signOut();
     return {
+      ok: false,
       error:
         "サーバー設定が不完全です（SUPABASE_SERVICE_ROLE_KEY）。管理者に Vercel の環境変数設定を依頼してください。",
     };
@@ -75,13 +74,13 @@ export async function loginAction(
   if (!profile || profile.status !== "active") {
     await supabase.auth.signOut();
     return {
-      error:
-        "スタッフ情報と紐づいていません。マスタ管理に登録されているログインメールで試してください。",
+      ok: false,
+      error: "スタッフ情報と紐づいていません。マスタ管理に登録されているログインメールで試してください。",
     };
   }
 
-  revalidatePath("/", "layout");
   return {
+    ok: true,
     redirectTo: resolveDestination({
       next,
       role: profile.role,

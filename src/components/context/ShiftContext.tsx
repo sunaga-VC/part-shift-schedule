@@ -10,6 +10,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { usePathname } from "next/navigation";
 import { getWeekDates, nowIso, toDateKey } from "@/lib/shift/dates";
 import {
   buildGoalRequiredMinutesByDepartment,
@@ -35,6 +36,7 @@ import {
 } from "@/lib/supabase/shiftPersistence";
 import {
   fetchStaffBootstrap,
+  type StaffBootstrap,
   type StaffPersistPatch,
 } from "@/lib/supabase/staff";
 import type {
@@ -235,6 +237,9 @@ type ShiftContextValue = {
   deleteDesiredShift: (date: string) => { ok: true } | { ok: false; message: string };
   /** Supabase 利用時: シフト変更を DB に即時反映 */
   flushShiftPersist: () => Promise<{ ok: true } | { ok: false; message: string }>;
+  /** ガントドラッグ中は自動保存を抑止（pointerup で flushShiftPersist） */
+  beginShiftDrag: () => void;
+  endShiftDrag: () => void;
   updateDesiredShiftTimes: (
     desiredId: string,
     startTime: string,
@@ -242,6 +247,7 @@ type ShiftContextValue = {
   ) => { ok: true } | { ok: false; message: string };
   addConfirmedFromDesired: (desiredId: string) => void;
   setDesiredShiftStatus: (desiredId: string, status: ConfirmedShift["status"]) => void;
+  setStaffDayStatus: (staffId: string, date: string, status: ConfirmedShift["status"]) => void;
   updateConfirmedShift: (
     id: string,
     patch: Partial<Pick<ConfirmedShift, "startTime" | "endTime" | "adminNote" | "note" | "status">>
@@ -259,6 +265,17 @@ type ShiftContextValue = {
 };
 
 const ShiftContext = createContext<ShiftContextValue | null>(null);
+
+type ShiftAuthContextValue = {
+  ready: boolean;
+  currentUser: Staff | undefined;
+  isAdmin: boolean;
+  canManageMaster: boolean;
+  canManageAdminAccounts: boolean;
+  workers: Staff[];
+};
+
+const ShiftAuthContext = createContext<ShiftAuthContextValue | null>(null);
 
 function buildShiftPersistenceSnapshot(state: AppState): ShiftPersistenceSnapshot {
   return {
@@ -309,22 +326,93 @@ async function fetchHomeMessagesFromApi(): Promise<HomeMessage[]> {
   return payload.ok && Array.isArray(payload.messages) ? payload.messages : [];
 }
 
-async function reloadRemoteAppData(): Promise<{
-  bootstrap: Awaited<ReturnType<typeof fetchStaffBootstrap>>;
+type RemoteAppData = {
+  bootstrap: StaffBootstrap;
   shiftSnapshot: ShiftPersistenceSnapshot;
   homeMessages: HomeMessage[];
-}> {
-  const supabase = createClient();
-  const bootstrap = await fetchStaffBootstrap(supabase, { attempts: 4 });
-  const [shiftSnapshot, homeMessages] = await Promise.all([
-    fetchShiftSnapshotFromApi(),
-    fetchHomeMessagesFromApi(),
-  ]);
-  return {
-    bootstrap,
-    shiftSnapshot: shiftSnapshot ?? createEmptyShiftPersistenceFallback(),
-    homeMessages,
-  };
+};
+
+let remoteAppLoadInFlight: { authUserId: string; promise: Promise<RemoteAppData | null> } | null = null;
+let remoteAppLoadCache: { authUserId: string; data: RemoteAppData; loadedAt: number } | null = null;
+const REMOTE_APP_LOAD_CACHE_MS = 10000;
+
+function readCachedRemoteAppData(authUserId: string): RemoteAppData | null {
+  if (
+    remoteAppLoadCache?.authUserId === authUserId &&
+    Date.now() - remoteAppLoadCache.loadedAt < REMOTE_APP_LOAD_CACHE_MS
+  ) {
+    return remoteAppLoadCache.data;
+  }
+  return null;
+}
+
+async function fetchAppBootstrapFromApi(options?: { attempts?: number }): Promise<RemoteAppData | null> {
+  const attempts = Math.max(1, options?.attempts ?? 1);
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+    }
+    try {
+      const response = await fetch("/api/bootstrap/app", {
+        method: "GET",
+        credentials: "same-origin",
+        cache: "no-store",
+        signal: AbortSignal.timeout(20000),
+      });
+      if (response.status === 401 || response.status === 403) continue;
+      if (!response.ok) return null;
+      const payload = (await response.json()) as {
+        ok?: boolean;
+        bootstrap?: StaffBootstrap;
+        snapshot?: ShiftPersistenceSnapshot;
+        messages?: HomeMessage[];
+      };
+      if (!payload.ok || !payload.bootstrap?.userId) return null;
+      return {
+        bootstrap: payload.bootstrap,
+        shiftSnapshot: payload.snapshot ?? createEmptyShiftPersistenceFallback(),
+        homeMessages: payload.messages ?? [],
+      };
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return null;
+      if (error instanceof Error && error.name === "AbortError") return null;
+      throw error;
+    }
+  }
+  return null;
+}
+
+async function reloadRemoteAppData(authUserId: string): Promise<RemoteAppData | null> {
+  const cached = readCachedRemoteAppData(authUserId);
+  if (cached) return cached;
+  if (remoteAppLoadInFlight?.authUserId === authUserId) {
+    return remoteAppLoadInFlight.promise;
+  }
+  const promise = fetchAppBootstrapFromApi();
+  remoteAppLoadInFlight = { authUserId, promise };
+  try {
+    const data = await promise;
+    if (data) {
+      remoteAppLoadCache = { authUserId, data, loadedAt: Date.now() };
+    }
+    return data;
+  } finally {
+    if (remoteAppLoadInFlight?.authUserId === authUserId && remoteAppLoadInFlight.promise === promise) {
+      remoteAppLoadInFlight = null;
+    }
+  }
+}
+
+async function fetchStaffBootstrapFromApi(): Promise<StaffBootstrap | null> {
+  const response = await fetch("/api/bootstrap/staff", {
+    method: "GET",
+    credentials: "same-origin",
+    cache: "no-store",
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!response.ok) return null;
+  const payload = (await response.json()) as { ok?: boolean; bootstrap?: StaffBootstrap };
+  return payload.ok && payload.bootstrap?.userId ? payload.bootstrap : null;
 }
 
 async function readApiJson<T extends { ok?: boolean; message?: string }>(
@@ -368,8 +456,10 @@ async function persistStaffPatchViaApi(
 }
 
 export function ShiftProvider({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
+  const isLoginPage = pathname === "/login";
   const [state, setState] = useState<AppState>(createEmptyAppState);
-  const [ready, setReady] = useState(false);
+  const [ready, setReady] = useState(isLoginPage);
   const staffPersistTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const staffPersistPatches = useRef<Record<string, StaffPersistPatch>>({});
   const latestShiftSnapshotRef = useRef<ShiftPersistenceSnapshot>(buildShiftPersistenceSnapshot(createEmptyAppState()));
@@ -379,7 +469,53 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   const shiftReloadDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shiftPersistDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shiftPersistQueuedRef = useRef(false);
+  const bootedAuthUserIdRef = useRef<string | null>(null);
+  const applyAuthInFlightRef = useRef<{ userId: string; promise: Promise<void> } | null>(null);
+  const skipRemoteReloadUntilRef = useRef(0);
+  const shiftRemoteHydratedRef = useRef(false);
+  const shiftDragActiveRef = useRef(false);
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const currentUserForSync = state.staffList.find((staff) => staff.id === state.currentUserId);
+
+  const shiftPersistSignature = useMemo(
+    () =>
+      buildShiftPersistenceSignature({
+        period: state.period,
+        desiredShifts: state.desiredShifts,
+        confirmedShifts: state.confirmedShifts,
+        requiredShifts: state.requiredShifts,
+        goalBlocksByDate: state.goalBlocksByDate,
+        goalMemos: state.goalMemos,
+        workerPublishedDates: state.workerPublishedDates,
+      }),
+    [
+      state.period,
+      state.desiredShifts,
+      state.confirmedShifts,
+      state.requiredShifts,
+      state.goalBlocksByDate,
+      state.goalMemos,
+      state.workerPublishedDates,
+    ]
+  );
+
+  const beginShiftDrag = useCallback(() => {
+    shiftDragActiveRef.current = true;
+    if (shiftPersistDebounceRef.current) {
+      clearTimeout(shiftPersistDebounceRef.current);
+      shiftPersistDebounceRef.current = null;
+    }
+  }, []);
+
+  const endShiftDrag = useCallback(() => {
+    shiftDragActiveRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    if (shiftDragActiveRef.current) return;
+    latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(state);
+  }, [shiftPersistSignature, state.confirmedShifts, state.desiredShifts, state.goalBlocksByDate, state.goalMemos, state.period, state.requiredShifts, state.workerPublishedDates]);
 
   const finishShiftPersist = useCallback((user?: Staff) => {
     shiftPersistInFlightRef.current = Math.max(0, shiftPersistInFlightRef.current - 1);
@@ -479,6 +615,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       if (lastShiftPersistSignatureRef.current === signature) return;
 
       shiftPersistInFlightRef.current += 1;
+      skipRemoteReloadUntilRef.current = Date.now() + 8000;
       try {
         const result = await persistSnapshotViaApi(user, snapshot);
         if (!result.ok) {
@@ -562,22 +699,50 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
   const refreshStaffFromSupabase = useCallback(async () => {
     try {
-      const remote = await reloadRemoteAppData();
+      const bootstrap = await fetchStaffBootstrapFromApi();
+      if (!bootstrap) return;
       setState((prev) => ({
         ...prev,
-        staffList: remote.bootstrap?.staffList ?? [],
-        departments: remote.bootstrap?.departments?.length
-          ? remote.bootstrap.departments
-          : prev.departments,
-        currentUserId: remote.bootstrap?.userId ?? prev.currentUserId,
-        homeMessages: remote.homeMessages,
+        staffList: bootstrap.staffList,
+        departments: bootstrap.departments.length > 0 ? bootstrap.departments : prev.departments,
+        currentUserId: bootstrap.userId,
       }));
     } catch (error) {
       console.warn("refreshStaffFromSupabase failed", error);
     }
   }, []);
 
+  const refreshAppDataInBackground = useCallback(async () => {
+    const authUserId = bootedAuthUserIdRef.current;
+    if (!authUserId) return;
+    try {
+      const remote = await reloadRemoteAppData(authUserId);
+      if (!remote?.bootstrap?.userId) return;
+      lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remote.shiftSnapshot);
+      setState((prev) => ({
+        ...prev,
+        staffList: remote.bootstrap.staffList,
+        departments: remote.bootstrap.departments.length > 0 ? remote.bootstrap.departments : prev.departments,
+        currentUserId: remote.bootstrap.userId,
+        homeMessages: remote.homeMessages,
+        ...remote.shiftSnapshot,
+      }));
+    } catch (error) {
+      console.warn("refreshAppDataInBackground failed", error);
+    }
+  }, []);
+
   useEffect(() => {
+    if (isLoginPage) {
+      setReady(true);
+    }
+  }, [isLoginPage]);
+
+  useEffect(() => {
+    if (isLoginPage) {
+      return;
+    }
+
     let cancelled = false;
     let authSubscription: { unsubscribe: () => void } | null = null;
     let initialSessionHandled = false;
@@ -586,47 +751,102 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     async function applyAuthUser(userId: string | null) {
       const generation = ++loadGeneration;
 
-      if (!userId) {
-        if (!cancelled) {
-          setState(createEmptyAppState());
-          setReady(true);
-        }
-        return;
-      }
-
       try {
-        if (!cancelled) {
-          setReady(false);
-        }
-
-        const remote = await reloadRemoteAppData();
-        if (cancelled || generation !== loadGeneration) return;
-
-        if (!remote.bootstrap?.userId) {
-          console.warn("staff bootstrap unavailable after login");
+        if (!userId) {
+          bootedAuthUserIdRef.current = null;
+          shiftRemoteHydratedRef.current = false;
+          remoteAppLoadCache = null;
           if (!cancelled) {
             setState(createEmptyAppState());
-            setReady(true);
           }
           return;
         }
 
-        lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remote.shiftSnapshot);
+        if (applyAuthInFlightRef.current?.userId === userId) {
+          await applyAuthInFlightRef.current.promise;
+          if (bootedAuthUserIdRef.current === userId) {
+            return;
+          }
+          const cachedAfterAwait = readCachedRemoteAppData(userId);
+          if (cachedAfterAwait && generation === loadGeneration && !cancelled) {
+            lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(
+              cachedAfterAwait.shiftSnapshot
+            );
+            bootedAuthUserIdRef.current = userId;
+            shiftRemoteHydratedRef.current = true;
+            setState({
+              staffList: cachedAfterAwait.bootstrap.staffList,
+              departments: cachedAfterAwait.bootstrap.departments,
+              currentUserId: cachedAfterAwait.bootstrap.userId,
+              homeMessages: cachedAfterAwait.homeMessages,
+              ...cachedAfterAwait.shiftSnapshot,
+            });
+            return;
+          }
+        } else if (bootedAuthUserIdRef.current === userId) {
+          return;
+        }
 
-        setState({
-          staffList: remote.bootstrap.staffList,
-          departments: remote.bootstrap.departments,
-          currentUserId: remote.bootstrap.userId,
-          homeMessages: remote.homeMessages,
-          ...remote.shiftSnapshot,
-        });
+        const cached = readCachedRemoteAppData(userId);
+        if (cached && generation === loadGeneration && !cancelled) {
+          lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(cached.shiftSnapshot);
+          bootedAuthUserIdRef.current = userId;
+          shiftRemoteHydratedRef.current = true;
+          setState({
+            staffList: cached.bootstrap.staffList,
+            departments: cached.bootstrap.departments,
+            currentUserId: cached.bootstrap.userId,
+            homeMessages: cached.homeMessages,
+            ...cached.shiftSnapshot,
+          });
+          return;
+        }
+
+        if (!cancelled) {
+          setReady(false);
+        }
+
+        const task = (async () => {
+          const remote = await reloadRemoteAppData(userId);
+          if (cancelled || generation !== loadGeneration) return;
+
+          if (!remote?.bootstrap?.userId) {
+            console.warn("staff bootstrap unavailable after login");
+            if (!cancelled) {
+              setState(createEmptyAppState());
+            }
+            return;
+          }
+
+          lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remote.shiftSnapshot);
+
+          if (!cancelled) {
+            bootedAuthUserIdRef.current = userId;
+            shiftRemoteHydratedRef.current = true;
+            setState({
+              staffList: remote.bootstrap.staffList,
+              departments: remote.bootstrap.departments,
+              currentUserId: remote.bootstrap.userId,
+              homeMessages: remote.homeMessages,
+              ...remote.shiftSnapshot,
+            });
+          }
+        })();
+
+        applyAuthInFlightRef.current = { userId, promise: task };
+        await task;
       } catch (error) {
         console.warn("Supabase staff bootstrap skipped", error);
         if (!cancelled) {
           setState(createEmptyAppState());
         }
       } finally {
-        if (!cancelled) setReady(true);
+        if (applyAuthInFlightRef.current?.userId === userId) {
+          applyAuthInFlightRef.current = null;
+        }
+        if (!cancelled && generation === loadGeneration) {
+          setReady(true);
+        }
       }
     }
 
@@ -643,19 +863,20 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
             void applyAuthUser(null);
             return;
           }
-          if (event === "SIGNED_IN" || event === "USER_UPDATED") {
+          if (event === "SIGNED_IN") {
+            if (session?.user?.id && session.user.id === bootedAuthUserIdRef.current) return;
+            void applyAuthUser(session?.user?.id ?? null);
+            return;
+          }
+          if (event === "USER_UPDATED") {
+            if (session?.user?.id && session.user.id === bootedAuthUserIdRef.current) {
+              void refreshAppDataInBackground();
+              return;
+            }
             void applyAuthUser(session?.user?.id ?? null);
           }
         });
         authSubscription = data.subscription;
-
-        window.setTimeout(() => {
-          if (cancelled || initialSessionHandled) return;
-          void supabase.auth.getSession().then(({ data: sessionData }) => {
-            if (cancelled || initialSessionHandled) return;
-            void applyAuthUser(sessionData.session?.user?.id ?? null);
-          });
-        }, 150);
       } catch (error) {
         console.warn("Supabase auth boot failed", error);
         if (!cancelled) {
@@ -670,15 +891,12 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       authSubscription?.unsubscribe();
     };
-  }, []);
+  }, [isLoginPage, refreshAppDataInBackground]);
 
-
-  useEffect(() => {
-    latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(state);
-  }, [state]);
 
   const flushShiftPersist = useCallback(async (): Promise<{ ok: true } | { ok: false; message: string }> => {
-    const currentUser = state.staffList.find((staff) => staff.id === state.currentUserId);
+    const snapshotState = stateRef.current;
+    const currentUser = snapshotState.staffList.find((staff) => staff.id === snapshotState.currentUserId);
     if (!currentUser) return { ok: true };
 
     if (shiftPersistDebounceRef.current) {
@@ -697,25 +915,27 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       const result = await persistSnapshotViaApi(currentUser, snapshot);
       if (!result.ok) return result;
       lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(snapshot);
+      skipRemoteReloadUntilRef.current = Date.now() + 8000;
       return { ok: true };
     } finally {
       finishShiftPersist(currentUser);
     }
-  }, [state, finishShiftPersist, persistSnapshotViaApi]);
+  }, [finishShiftPersist, persistSnapshotViaApi]);
 
   useEffect(() => {
-    if (!ready || !currentUserForSync) return;
+    if (!ready || !currentUserForSync || !shiftRemoteHydratedRef.current) return;
+    if (shiftDragActiveRef.current) return;
 
-    const signature = buildShiftPersistenceSignature(latestShiftSnapshotRef.current);
-    if (lastShiftPersistSignatureRef.current === signature) return;
+    if (lastShiftPersistSignatureRef.current === shiftPersistSignature) return;
 
     if (shiftPersistDebounceRef.current) {
       clearTimeout(shiftPersistDebounceRef.current);
     }
 
-    const debounceMs = currentUserForSync.role === "worker" ? 400 : 700;
+    const debounceMs = currentUserForSync.role === "worker" ? 400 : 900;
     shiftPersistDebounceRef.current = setTimeout(() => {
       shiftPersistDebounceRef.current = null;
+      if (shiftDragActiveRef.current) return;
       void runShiftPersist(currentUserForSync);
     }, debounceMs);
 
@@ -724,7 +944,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         clearTimeout(shiftPersistDebounceRef.current);
       }
     };
-  }, [ready, state, currentUserForSync, runShiftPersist]);
+  }, [ready, shiftPersistSignature, currentUserForSync, runShiftPersist]);
 
 
   useEffect(() => {
@@ -740,10 +960,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         return;
       }
       try {
-        const [next, homeMessages] = await Promise.all([
-          fetchShiftSnapshotFromApi(),
-          fetchHomeMessagesFromApi(),
-        ]);
+        const next = await fetchShiftSnapshotFromApi();
         if (!next || cancelled) return;
         lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(next);
         setState((prev) => {
@@ -759,7 +976,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
             ...prev,
             ...next,
             workerPublishedDates: mergedPublishedDates,
-            homeMessages,
+            homeMessages: prev.homeMessages,
             staffList: prev.staffList,
             departments: prev.departments,
             currentUserId: prev.currentUserId,
@@ -771,27 +988,39 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     };
 
     const scheduleReloadShiftSnapshot = () => {
+      if (Date.now() < skipRemoteReloadUntilRef.current) return;
+      if (shiftDragActiveRef.current) return;
       if (shiftReloadDebounceRef.current) {
         clearTimeout(shiftReloadDebounceRef.current);
       }
       shiftReloadDebounceRef.current = setTimeout(() => {
         shiftReloadDebounceRef.current = null;
         void reloadShiftSnapshot();
-      }, 350);
+      }, 600);
     };
 
     void (async () => {
       try {
         supabase = createClient();
-        channel = supabase
-          .channel("shift-state-sync")
-          .on("postgres_changes", { event: "*", schema: "public", table: "desired_shifts" }, scheduleReloadShiftSnapshot)
-          .on("postgres_changes", { event: "*", schema: "public", table: "confirmed_shifts" }, scheduleReloadShiftSnapshot)
-          .on("postgres_changes", { event: "*", schema: "public", table: "required_shifts" }, scheduleReloadShiftSnapshot)
-          .on("postgres_changes", { event: "*", schema: "public", table: "goal_block_slots" }, scheduleReloadShiftSnapshot)
-          .on("postgres_changes", { event: "*", schema: "public", table: "goal_memos" }, scheduleReloadShiftSnapshot)
-          .on("postgres_changes", { event: "*", schema: "public", table: "shift_periods" }, scheduleReloadShiftSnapshot)
-          .on("postgres_changes", { event: "*", schema: "public", table: "home_messages" }, scheduleReloadShiftSnapshot);
+        channel = supabase.channel("shift-state-sync");
+        const tables =
+          currentUserForSync.role === "worker"
+            ? (["desired_shifts", "confirmed_shifts"] as const)
+            : ([
+                "desired_shifts",
+                "confirmed_shifts",
+                "required_shifts",
+                "goal_block_slots",
+                "goal_memos",
+                "shift_periods",
+              ] as const);
+        for (const table of tables) {
+          channel.on(
+            "postgres_changes",
+            { event: "*", schema: "public", table },
+            scheduleReloadShiftSnapshot
+          );
+        }
         channel.subscribe();
       } catch (error) {
         console.warn("Shift realtime subscription skipped", error);
@@ -1584,43 +1813,47 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     const now = nowIso();
 
     setState((prev) => {
-      const desired = prev.desiredShifts.find((s) => s.id === desiredId);
-      if (!desired) return prev;
-      const existingConfirmed = prev.confirmedShifts.find(
+      const desiredIndex = prev.desiredShifts.findIndex((s) => s.id === desiredId);
+      if (desiredIndex < 0) return prev;
+      const desired = prev.desiredShifts[desiredIndex];
+      const confirmedIndex = prev.confirmedShifts.findIndex(
         (s) => s.staffId === desired.staffId && s.date === desired.date
       );
+      const existingConfirmed = confirmedIndex >= 0 ? prev.confirmedShifts[confirmedIndex] : undefined;
       const shouldMarkAdjusting = existingConfirmed ? isAttendanceStatus(existingConfirmed.status) : false;
+
+      const nextDesiredShifts = prev.desiredShifts.slice();
+      nextDesiredShifts[desiredIndex] = {
+        ...desired,
+        startTime,
+        endTime,
+        breakMinutes,
+        actualMinutes,
+        updatedAt: now,
+      };
+
+      let nextConfirmedShifts = prev.confirmedShifts;
+      if (confirmedIndex >= 0) {
+        nextConfirmedShifts = prev.confirmedShifts.slice();
+        nextConfirmedShifts[confirmedIndex] = {
+          ...existingConfirmed!,
+          startTime,
+          endTime,
+          breakMinutes,
+          actualMinutes,
+          status: shouldMarkAdjusting ? ("adjusting" as const) : existingConfirmed!.status,
+          updatedAt: now,
+        };
+      }
 
       const nextState = {
         ...prev,
-        desiredShifts: prev.desiredShifts.map((s) =>
-          s.id === desiredId
-            ? {
-                ...s,
-                startTime,
-                endTime,
-                breakMinutes,
-                actualMinutes,
-                updatedAt: now,
-              }
-            : s
-        ),
-        confirmedShifts: prev.confirmedShifts.map((s) =>
-          s.staffId === desired.staffId && s.date === desired.date
-            ? {
-                ...s,
-                startTime,
-                endTime,
-                breakMinutes,
-                actualMinutes,
-                status: shouldMarkAdjusting ? ("adjusting" as const) : s.status,
-                updatedAt: now,
-              }
-            : s
-        ),
-        period: shouldMarkAdjusting || existingConfirmed
-          ? { ...prev.period, adjustmentStatus: "adjusting" as const, updatedAt: now }
-          : prev.period,
+        desiredShifts: nextDesiredShifts,
+        confirmedShifts: nextConfirmedShifts,
+        period:
+          shouldMarkAdjusting || existingConfirmed
+            ? { ...prev.period, adjustmentStatus: "adjusting" as const, updatedAt: now }
+            : prev.period,
       };
       latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(nextState);
       return nextState;
@@ -1676,19 +1909,26 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       }
 
       if (existing) {
-        const updatedConfirmed: ConfirmedShift =
-          isAttendanceStatus(status)
-            ? {
-                ...existing,
-                status,
-                startTime: desired.startTime,
-                endTime: desired.endTime,
-                breakMinutes: desired.breakMinutes,
-                actualMinutes: desired.actualMinutes,
-                note: desired.note,
-                updatedAt: now,
-              }
-            : { ...existing, status, updatedAt: now };
+        const updatedConfirmed: ConfirmedShift = isAttendanceStatus(status)
+          ? {
+              ...existing,
+              status,
+              startTime: desired.startTime,
+              endTime: desired.endTime,
+              breakMinutes: desired.breakMinutes,
+              actualMinutes: desired.actualMinutes,
+              note: desired.note,
+              updatedAt: now,
+            }
+          : {
+              ...existing,
+              status,
+              startTime: "09:00",
+              endTime: "09:01",
+              breakMinutes: 0,
+              actualMinutes: 0,
+              updatedAt: now,
+            };
         const nextState = {
           ...prev,
           confirmedShifts: prev.confirmedShifts.map((s) =>
@@ -1706,11 +1946,11 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         periodId: desired.periodId,
         date: desired.date,
         status,
-        startTime: desired.startTime,
-        endTime: desired.endTime,
-        breakMinutes: desired.breakMinutes,
-        actualMinutes: desired.actualMinutes,
-        note: desired.note,
+        startTime: isAttendanceStatus(status) ? desired.startTime : "09:00",
+        endTime: isAttendanceStatus(status) ? desired.endTime : "09:01",
+        breakMinutes: isAttendanceStatus(status) ? desired.breakMinutes : 0,
+        actualMinutes: isAttendanceStatus(status) ? desired.actualMinutes : 0,
+        note: isAttendanceStatus(status) ? desired.note : "",
         adminNote: "",
         publishedAt: null,
         createdAt: now,
@@ -1730,6 +1970,68 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   const addConfirmedFromDesired = useCallback((desiredId: string) => {
     setDesiredShiftStatus(desiredId, "confirmed");
   }, [setDesiredShiftStatus]);
+
+  const setStaffDayStatus = useCallback((staffId: string, date: string, status: ConfirmedShift["status"]) => {
+    setState((prev) => {
+      const desired = prev.desiredShifts.find((shift) => shift.staffId === staffId && shift.date === date);
+      if (desired) {
+        return prev;
+      }
+      const existing = prev.confirmedShifts.find((shift) => shift.staffId === staffId && shift.date === date);
+      const now = nowIso();
+      const isRest = status === "unconfirmed";
+      const startTime = isRest ? "09:00" : existing?.startTime ?? "10:00";
+      const endTime = isRest ? "09:01" : existing?.endTime ?? "18:00";
+      const breakMinutes = isRest ? 0 : calcBreakMinutes(startTime, endTime);
+      const actualMinutes = isRest ? 0 : calcActualMinutes(startTime, endTime, breakMinutes);
+
+      if (existing) {
+        const nextState = {
+          ...prev,
+          confirmedShifts: prev.confirmedShifts.map((shift) =>
+            shift.id === existing.id
+              ? {
+                  ...shift,
+                  status,
+                  startTime,
+                  endTime,
+                  breakMinutes,
+                  actualMinutes,
+                  updatedAt: now,
+                }
+              : shift
+          ),
+          period: { ...prev.period, adjustmentStatus: "adjusting" as const, updatedAt: now },
+        };
+        latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(nextState);
+        return nextState;
+      }
+
+      const created: ConfirmedShift = {
+        id: `confirm-${staffId}-${date}`,
+        staffId,
+        periodId: prev.period.id,
+        date,
+        status,
+        startTime,
+        endTime,
+        breakMinutes,
+        actualMinutes,
+        note: "",
+        adminNote: "",
+        publishedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const nextState = {
+        ...prev,
+        confirmedShifts: [...prev.confirmedShifts, created],
+        period: { ...prev.period, adjustmentStatus: "adjusting" as const, updatedAt: now },
+      };
+      latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(nextState);
+      return nextState;
+    });
+  }, []);
 
   const updateConfirmedShift = useCallback(
     (
@@ -1958,49 +2260,120 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   );
 
 
-  const value: ShiftContextValue = {
-    ready,
-    state,
-    currentUser,
-    isAdmin,
-    canManageMaster,
-    canManageAdminAccounts: canManageAdmins,
-    workers,
-    updatePeriod,
-    updateGoalBlockCount,
-    updateGoalBlockDepartment,
-    setGoalBlocksForDate,
-    applyGoalBlocksRepeat,
-    upsertGoalMemo,
-    deleteGoalMemo,
-    updateStaff,
-    saveStaffProfile,
-    changeStaffPassword,
-    flushStaffPersistForStaff,
-    createStaff,
-    refreshStaffFromSupabase,
-    addSalaryRaise,
-    updateSalaryRaise,
-    deleteStaff,
-    addDepartment,
-    updateDepartment,
-    deleteDepartment,
-    upsertDesiredShift,
-    deleteDesiredShift,
-    flushShiftPersist,
-    addConfirmedFromDesired,
-    setDesiredShiftStatus,
-    updateDesiredShiftTimes,
-    updateConfirmedShift,
-    removeConfirmedShift,
-    publishConfirmed,
-    unpublishConfirmed,
-    upsertRequired,
-    createHomeMessage,
-    deleteHomeMessage,
-  };
+  const authContextValue = useMemo(
+    (): ShiftAuthContextValue => ({
+      ready,
+      currentUser,
+      isAdmin: Boolean(isAdmin),
+      canManageMaster,
+      canManageAdminAccounts: canManageAdmins,
+      workers,
+    }),
+    [ready, currentUser, isAdmin, canManageMaster, canManageAdmins, workers]
+  );
 
-  return <ShiftContext.Provider value={value}>{children}</ShiftContext.Provider>;
+  const value: ShiftContextValue = useMemo(
+    () => ({
+      ready,
+      state,
+      currentUser,
+      isAdmin: Boolean(isAdmin),
+      canManageMaster,
+      canManageAdminAccounts: canManageAdmins,
+      workers,
+      updatePeriod,
+      updateGoalBlockCount,
+      updateGoalBlockDepartment,
+      setGoalBlocksForDate,
+      applyGoalBlocksRepeat,
+      upsertGoalMemo,
+      deleteGoalMemo,
+      updateStaff,
+      saveStaffProfile,
+      changeStaffPassword,
+      flushStaffPersistForStaff,
+      createStaff,
+      refreshStaffFromSupabase,
+      addSalaryRaise,
+      updateSalaryRaise,
+      deleteStaff,
+      addDepartment,
+      updateDepartment,
+      deleteDepartment,
+      upsertDesiredShift,
+      deleteDesiredShift,
+      flushShiftPersist,
+      beginShiftDrag,
+      endShiftDrag,
+      addConfirmedFromDesired,
+      setDesiredShiftStatus,
+      setStaffDayStatus,
+      updateDesiredShiftTimes,
+      updateConfirmedShift,
+      removeConfirmedShift,
+      publishConfirmed,
+      unpublishConfirmed,
+      upsertRequired,
+      createHomeMessage,
+      deleteHomeMessage,
+    }),
+    [
+      ready,
+      state,
+      currentUser,
+      isAdmin,
+      canManageMaster,
+      canManageAdmins,
+      workers,
+      updatePeriod,
+      updateGoalBlockCount,
+      updateGoalBlockDepartment,
+      setGoalBlocksForDate,
+      applyGoalBlocksRepeat,
+      upsertGoalMemo,
+      deleteGoalMemo,
+      updateStaff,
+      saveStaffProfile,
+      changeStaffPassword,
+      flushStaffPersistForStaff,
+      createStaff,
+      refreshStaffFromSupabase,
+      addSalaryRaise,
+      updateSalaryRaise,
+      deleteStaff,
+      addDepartment,
+      updateDepartment,
+      deleteDepartment,
+      upsertDesiredShift,
+      deleteDesiredShift,
+      flushShiftPersist,
+      beginShiftDrag,
+      endShiftDrag,
+      addConfirmedFromDesired,
+      setDesiredShiftStatus,
+      setStaffDayStatus,
+      updateDesiredShiftTimes,
+      updateConfirmedShift,
+      removeConfirmedShift,
+      publishConfirmed,
+      unpublishConfirmed,
+      upsertRequired,
+      createHomeMessage,
+      deleteHomeMessage,
+    ]
+  );
+
+  return (
+    <ShiftAuthContext.Provider value={authContextValue}>
+      <ShiftContext.Provider value={value}>{children}</ShiftContext.Provider>
+    </ShiftAuthContext.Provider>
+  );
+}
+
+export function useShiftAuth() {
+  const ctx = useContext(ShiftAuthContext);
+  if (!ctx) throw new Error("useShiftAuth must be used within ShiftProvider");
+  return ctx;
 }
 
 export function useShift() {

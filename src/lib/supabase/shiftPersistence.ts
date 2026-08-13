@@ -1,6 +1,6 @@
 import { createClient } from "@/lib/supabase/client";
 import { buildGoalRequiredMinutesByDepartment, createDefaultGoalBlocks, normalizeGoalBlocks } from "@/lib/shift/goal";
-import { getMondayOfWeek, getWeekDates } from "@/lib/shift/dates";
+import { getMondayOfWeek, getWeekDates, toDateKeyJst } from "@/lib/shift/dates";
 import {
   computeWorkerPublishedDates,
   hasWishChangedAfterPublish,
@@ -258,13 +258,45 @@ function deserializeRequiredShifts(
     }));
 }
 
+function shiftMonthKey(year: number, month: number, deltaMonths: number): { year: number; month: number } {
+  const next = new Date(year, month + deltaMonths, 1);
+  return { year: next.getFullYear(), month: next.getMonth() };
+}
+
+/** カレンダー表示範囲（±2ヶ月）+ 余裕を含む goal_block 読み込み範囲 */
+function getGoalBlockLoadDateRange(fallback: ShiftPersistenceSnapshot): { start: string; end: string } {
+  const today = new Date();
+  const rangeStart = shiftMonthKey(today.getFullYear(), today.getMonth(), -5);
+  const rangeEnd = shiftMonthKey(today.getFullYear(), today.getMonth(), 5);
+  const defaultStart = toDateKeyJst(new Date(rangeStart.year, rangeStart.month, 1));
+  const defaultEnd = toDateKeyJst(new Date(rangeEnd.year, rangeEnd.month + 1, 0));
+
+  const dates: string[] = [
+    ...fallback.desiredShifts.map((shift) => shift.date),
+    ...fallback.confirmedShifts.map((shift) => shift.date),
+    ...fallback.requiredShifts.map((shift) => shift.date),
+    ...Object.keys(fallback.goalBlocksByDate),
+  ];
+  if (dates.length === 0) {
+    return { start: defaultStart, end: defaultEnd };
+  }
+  dates.sort();
+  return {
+    start: dates[0] < defaultStart ? dates[0] : defaultStart,
+    end: dates[dates.length - 1] > defaultEnd ? dates[dates.length - 1] : defaultEnd,
+  };
+}
+
 export async function loadShiftSnapshotFromSupabase(
   supabase: SupabaseClient,
-  fallback: ShiftPersistenceSnapshot
+  fallback: ShiftPersistenceSnapshot,
+  preloadedDepartments?: DepartmentRow[]
 ): Promise<ShiftPersistenceSnapshot> {
   const [latestPeriodResult, departmentsResult] = await Promise.all([
     supabase.from("shift_periods").select("*").order("created_at", { ascending: false }).limit(1).maybeSingle(),
-    supabase.from("departments").select("id, name"),
+    preloadedDepartments
+      ? Promise.resolve({ data: preloadedDepartments, error: null as null })
+      : supabase.from("departments").select("id, name"),
   ]);
 
   if (latestPeriodResult.error) throw latestPeriodResult.error;
@@ -288,12 +320,20 @@ export async function loadShiftSnapshotFromSupabase(
   }
 
   const periodId = periodRow.id;
+  const goalBlockRange = getGoalBlockLoadDateRange(fallback);
   const [desiredResult, confirmedResult, requiredResult, goalBlocksResult, goalMemoResult] =
     await Promise.all([
       supabase.from("desired_shifts").select("*").eq("period_id", periodId).order("work_date", { ascending: true }),
       supabase.from("confirmed_shifts").select("*").eq("period_id", periodId).order("work_date", { ascending: true }),
       supabase.from("required_shifts").select("*").eq("period_id", periodId).order("work_date", { ascending: true }),
-      supabase.from("goal_block_slots").select("*").order("work_date", { ascending: true }).order("block_index", { ascending: true }).order("slot_index", { ascending: true }),
+      supabase
+        .from("goal_block_slots")
+        .select("*")
+        .gte("work_date", goalBlockRange.start)
+        .lte("work_date", goalBlockRange.end)
+        .order("work_date", { ascending: true })
+        .order("block_index", { ascending: true })
+        .order("slot_index", { ascending: true }),
       supabase.from("goal_memos").select("*").eq("period_id", periodId).order("start_date", { ascending: true }),
     ]);
   if (desiredResult.error) throw desiredResult.error;
@@ -501,6 +541,17 @@ export type WorkerPublishContext = {
   staffList: Pick<Staff, "id" | "role" | "status" | "team">[];
   knownDepartments: ReadonlySet<string>;
 };
+
+/** 初回 bootstrap 済みの staffList から worker 用コンテキストを組み立て（DB 再取得を避ける） */
+export function buildWorkerPublishContextFromStaffList(
+  staffList: Pick<Staff, "id" | "role" | "status" | "team">[],
+  staffId: string,
+  knownDepartmentNames: string[]
+): WorkerPublishContext {
+  const knownDepartments = new Set(knownDepartmentNames);
+  const workerTeam = staffList.find((staff) => staff.id === staffId)?.team ?? "";
+  return { staffId, workerTeam, staffList, knownDepartments };
+}
 
 export async function loadWorkerPublishContext(
   supabase: SupabaseClient,
@@ -725,15 +776,17 @@ async function deleteShiftStaffDateRows(
   table: "desired_shifts" | "confirmed_shifts",
   rows: ShiftStaffDateRow[]
 ): Promise<void> {
-  const uniqueKeys = new Map<string, ShiftStaffDateRow>();
+  const datesByStaff = new Map<string, Set<string>>();
   for (const row of rows) {
-    uniqueKeys.set(`${row.staff_id}:${row.work_date}`, row);
+    const dates = datesByStaff.get(row.staff_id) ?? new Set<string>();
+    dates.add(row.work_date);
+    datesByStaff.set(row.staff_id, dates);
   }
-  if (uniqueKeys.size === 0) return;
+  if (datesByStaff.size === 0) return;
 
   const results = await Promise.all(
-    Array.from(uniqueKeys.values()).map((row) =>
-      supabase.from(table).delete().eq("staff_id", row.staff_id).eq("work_date", row.work_date)
+    Array.from(datesByStaff.entries()).map(([staffId, dates]) =>
+      supabase.from(table).delete().eq("staff_id", staffId).in("work_date", Array.from(dates))
     )
   );
   const error = results.find((result) => result.error)?.error;

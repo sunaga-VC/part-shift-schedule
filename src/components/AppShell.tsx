@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Icons } from "@/components/icons";
-import { useShift } from "@/components/context/ShiftContext";
+import { useShiftAuth } from "@/components/context/ShiftContext";
 import { createClient } from "@/lib/supabase/client";
 import { getStaffDisplayName } from "@/lib/shift/display";
 
@@ -18,9 +18,9 @@ const adminBaseLinks = [
 
 const masterLink = { href: "/admin/master", label: "マスタ管理", Icon: Icons.Master };
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+export const AppShell = memo(function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { ready, currentUser, isAdmin, canManageMaster } = useShift();
+  const { ready, currentUser, isAdmin, canManageMaster } = useShiftAuth();
   const links = isAdmin
     ? canManageMaster
       ? [...adminBaseLinks, masterLink]
@@ -200,4 +200,4 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       ) : null}
     </div>
   );
-}
+});

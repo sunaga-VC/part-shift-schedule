@@ -87,6 +87,7 @@ export async function updateSession(request: NextRequest) {
     return supabaseResponse;
   }
   const isLoginPage = pathname === "/login";
+  const isLoginApi = pathname === "/api/login";
   const isPublicAsset =
     pathname.startsWith("/_next") || pathname.startsWith("/favicon") || pathname.includes(".");
 
@@ -147,8 +148,8 @@ export async function updateSession(request: NextRequest) {
 
   const isLoggedIn = Boolean(user);
 
-  // ログイン画面は常に開ける（別アカウントへの切り替え用）
-  if (isLoginPage) {
+  // ログイン画面・ログイン API は未ログインでも利用可
+  if (isLoginPage || isLoginApi) {
     return supabaseResponse;
   }
 
@@ -157,6 +158,11 @@ export async function updateSession(request: NextRequest) {
       return apiJsonError(401, "ログインが必要です。");
     }
     return redirectToLogin(request, pathname);
+  }
+
+  // API は各 route 側で権限チェックするため、middleware ではセッション確認のみ（DB 照会を省略）
+  if (isApiRoute(pathname)) {
+    return supabaseResponse;
   }
 
   const userEmail = user?.email?.trim().toLowerCase();

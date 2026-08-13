@@ -119,16 +119,17 @@ export async function requireFullManagerService(): Promise<MasterContext> {
   return requireMasterContext({ requireFullManager: true });
 }
 
-type AuthenticatedProfileContext =
-  | {
-      ok: true;
-      authUserId: string;
-      profileId: string;
-      role: "worker" | "admin";
-      adminPermission: AdminPermission;
-      service: NonNullable<ReturnType<typeof getServiceClient>>;
-    }
-  | { ok: false; response: NextResponse };
+export type AuthenticatedProfileOk = {
+  ok: true;
+  authUserId: string;
+  profileId: string;
+  email: string;
+  role: "worker" | "admin";
+  adminPermission: AdminPermission;
+  service: NonNullable<ReturnType<typeof getServiceClient>>;
+};
+
+type AuthenticatedProfileContext = AuthenticatedProfileOk | { ok: false; response: NextResponse };
 
 type StaffProfileAuthRow = {
   id: string;
@@ -211,6 +212,7 @@ export async function requireAuthenticatedProfileService(): Promise<Authenticate
     ok: true,
     authUserId: user.id,
     profileId: profile.id,
+    email: userEmail,
     role: profile.role,
     adminPermission: (profile.admin_permission ?? "general") as AdminPermission,
     service,

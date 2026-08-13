@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, memo } from "react";
 import { CalendarNavToolbar } from "@/components/CalendarNavToolbar";
 import { Icons } from "@/components/icons";
 import { useShift } from "@/components/context/ShiftContext";
@@ -40,12 +40,13 @@ import { canOperateDepartment, getManagedDepartmentsForAdmin, listOperableDepart
 import {
   getAdminShiftStatus,
   hasStaffPendingAdjustment,
+  isAdminResubmissionPending,
   isDepartmentCalendarDatePublished,
   resolveAdminShiftDisplay,
 } from "@/lib/shift/publish-state";
 import { buildWeeklyStaffSummary } from "@/lib/shift/summary";
 import { formatConfirmedWithDiff, formatMinutes, formatShiftSummary, formatTimeRange, normalizeDisplayTime, toMinutes } from "@/lib/shift/time";
-import type { ConfirmedShift } from "@/lib/shift/types";
+import type { ConfirmedShift, DesiredShift, Staff } from "@/lib/shift/types";
 
 /** 在宅用: 時間帯の円弧だけを点線で描く（終了以降は描画しない） */
 function buildRemoteRingDashArray(spanPct: number): string {
@@ -79,6 +80,335 @@ function buildRemoteRingDashArray(spanPct: number): string {
   return parts.join(" ");
 }
 
+type CalendarIconEntry = {
+  staff: Staff;
+  currentStatus: ConfirmedShift["status"];
+  pendingResubmission: boolean;
+  iconChar: string;
+  statusColor: string;
+  spanPct: number;
+  startPct: number;
+  isRemote: boolean;
+  progressDasharray: string;
+  title: string;
+};
+
+function buildCalendarIconEntry(
+  staff: Staff,
+  currentStatus: ConfirmedShift["status"],
+  shift: ReturnType<typeof resolveAdminShiftDisplay> | null,
+  pendingResubmission: boolean
+): CalendarIconEntry {
+  const startPct = shift
+    ? Math.max(0, Math.min(1, (Math.max(toMinutes(shift.startTime), 10 * 60) - 10 * 60) / (8 * 60)))
+    : 0;
+  const endPct = shift
+    ? Math.max(0, Math.min(1, (Math.min(toMinutes(shift.endTime), 18 * 60) - 10 * 60) / (8 * 60)))
+    : 0;
+  const spanPct = Math.max(0, endPct - startPct);
+  const isRemote = currentStatus === "remote";
+  return {
+    staff,
+    currentStatus,
+    pendingResubmission,
+    iconChar: getStaffDisplayInitial(staff),
+    statusColor: getShiftStatusRingColor(currentStatus),
+    spanPct,
+    startPct,
+    isRemote,
+    progressDasharray: isRemote ? buildRemoteRingDashArray(spanPct) : `${spanPct} ${1 - spanPct}`,
+    title: `${getStaffDisplayName(staff)}さん${isRemote ? "（在宅）" : ""}`,
+  };
+}
+
+type CalendarDayData = {
+  departmentRows: Array<{
+    department: string;
+    entries: CalendarIconEntry[];
+  }>;
+  dayMemos: ReturnType<typeof getGoalMemosForDate>;
+  dayRequiredNote: string;
+};
+
+const AdminCalendarDayCell = memo(function AdminCalendarDayCell({
+  date,
+  weekIndex,
+  currentWeekIndex,
+  selected,
+  dayData,
+  publishedByDateDept,
+  onSelectDate,
+  onEditRequired,
+}: {
+  date: string;
+  weekIndex: number;
+  currentWeekIndex: number;
+  selected: boolean;
+  dayData: CalendarDayData;
+  publishedByDateDept: Map<string, boolean>;
+  onSelectDate: (date: string) => void;
+  onEditRequired: (date: string) => void;
+}) {
+  const { departmentRows, dayMemos, dayRequiredNote } = dayData;
+  return (
+    <div
+      className={`day-cell${selected ? " selected" : ""}${weekIndex < currentWeekIndex ? " past" : ""}`}
+      onClick={() => onSelectDate(date)}
+    >
+      <div className="day-cell-top">
+        <div className="day-cell-date-line">
+          <div className="day-num">{formatDateShort(date)}</div>
+          {dayMemos.length > 0 ? (
+            <div className="day-cell-memos">
+              {dayMemos.map((memo) => (
+                <span key={memo.id} className="day-cell-memo" title={memo.body}>
+                  {memo.body}
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {dayRequiredNote ? (
+            <span className="day-cell-required-note" title={dayRequiredNote}>
+              {dayRequiredNote}
+            </span>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          className="btn day-cell-edit-btn"
+          aria-label="目安時間を編集"
+          onClick={(e) => {
+            e.stopPropagation();
+            onEditRequired(date);
+          }}
+        >
+          <Icons.Pencil size={10} strokeWidth={2.2} />
+        </button>
+      </div>
+      <div className="day-meta day-status-strip">
+        {departmentRows.map(({ department, entries }, index) => {
+          const isPublished = publishedByDateDept.get(`${date}:${department}`) ?? false;
+          return (
+            <div
+              key={department}
+              className={`day-status-row department-row${isPublished ? " published" : ""}`}
+              style={{ borderBottom: index < departmentRows.length - 1 ? "1px solid var(--line)" : undefined }}
+            >
+              <div className="day-status-row-icons">
+                {entries.map((entry) => (
+                  <span
+                    key={entry.staff.id}
+                    className={`day-status-icon-cell${entry.pendingResubmission ? " pending" : ""}`}
+                  >
+                    <span
+                      className={`day-status-icon ${entry.currentStatus}`}
+                      title={entry.title}
+                    >
+                      <svg className="day-status-ring" viewBox="0 0 20 20" aria-hidden="true">
+                        <circle cx="10" cy="10" r="7.5" fill="none" stroke="#e5e7eb" strokeWidth="2" />
+                        {entry.spanPct > 0 ? (
+                          <circle
+                            className="day-status-ring-progress"
+                            cx="10"
+                            cy="10"
+                            r="7.5"
+                            fill="none"
+                            stroke={entry.statusColor}
+                            strokeWidth={entry.isRemote ? 1.6 : 2}
+                            strokeLinecap={entry.isRemote ? "butt" : "round"}
+                            pathLength={1}
+                            strokeDasharray={entry.progressDasharray}
+                            strokeDashoffset={-entry.startPct}
+                            transform="rotate(-90 10 10)"
+                          />
+                        ) : null}
+                      </svg>
+                      <span className="day-status-initial">{entry.iconChar}</span>
+                    </span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+});
+
+type AdminGanttRowProps = {
+  staff: Staff;
+  desiredShift: DesiredShift | undefined;
+  confirmedShift: ConfirmedShift | undefined;
+  currentStatus: ConfirmedShift["status"];
+  dragPreview: { startTime: string; endTime: string } | null;
+  canOperate: boolean;
+  weekConfirmedMinutes: number;
+  ganttDate: string;
+  onStatusChange: (
+    staffId: string,
+    date: string,
+    nextStatus: ConfirmedShift["status"],
+    desiredShift: DesiredShift | undefined,
+    confirmedShift: ConfirmedShift | undefined
+  ) => void;
+  onDragHandleDown: (
+    desiredId: string,
+    edge: "start" | "end",
+    track: HTMLDivElement,
+    barStartTime: string,
+    barEndTime: string
+  ) => void;
+};
+
+const AdminGanttRow = memo(function AdminGanttRow({
+  staff,
+  desiredShift,
+  confirmedShift,
+  currentStatus,
+  dragPreview,
+  canOperate,
+  weekConfirmedMinutes,
+  ganttDate,
+  onStatusChange,
+  onDragHandleDown,
+}: AdminGanttRowProps) {
+  const editableDesired = desiredShift;
+  const displayShift = resolveAdminShiftDisplay(confirmedShift, desiredShift, {
+    currentStatus,
+  });
+  const canEditStatus = canOperate;
+  const canEditTime = canOperate && currentStatus !== "unconfirmed" && Boolean(editableDesired);
+  const barStartTime = dragPreview?.startTime ?? displayShift?.startTime ?? "10:00";
+  const barEndTime = dragPreview?.endTime ?? displayShift?.endTime ?? "18:00";
+
+  return (
+    <div className="timeline-row timeline-row-gantt">
+      <div className="timeline-worker-name">
+        <select
+          className={`status-select timeline-status-select ${currentStatus}`}
+          value={currentStatus}
+          onChange={(e) => {
+            if (!canEditStatus) return;
+            onStatusChange(
+              staff.id,
+              ganttDate,
+              e.target.value as ConfirmedShift["status"],
+              editableDesired,
+              confirmedShift
+            );
+          }}
+          disabled={!canEditStatus}
+        >
+          <option value="confirmed">出社</option>
+          <option value="remote">在宅</option>
+          <option value="adjusting">調整</option>
+          <option value="unconfirmed">休み</option>
+        </select>
+        <div className="timeline-worker-meta">
+          <span className="timeline-worker-name-row">
+            <span>{getStaffDisplayName(staff)}</span>
+            {(displayShift?.note)?.trim() ? (
+              <span
+                className="gantt-worker-note-alert"
+                tabIndex={0}
+                aria-label={`備考: ${(displayShift?.note || "").trim()}`}
+              >
+                <Icons.Alert size={18} strokeWidth={2.6} />
+                <span className="gantt-worker-note-tooltip" role="tooltip">
+                  {(displayShift?.note || "").trim()}
+                </span>
+              </span>
+            ) : null}
+          </span>
+          <span className="timeline-week-hours">
+            週合計 {formatMinutes(weekConfirmedMinutes)}
+          </span>
+        </div>
+      </div>
+      <div className="timeline-track timeline-track-gantt">
+        <div className="timeline-grid-lines">
+          {[10, 12, 14, 16, 18].map((hour) => (
+            <span
+              key={hour}
+              className="timeline-grid-line"
+              style={{ left: `${((hour - 10) / 9) * 100}%` }}
+            />
+          ))}
+        </div>
+        {displayShift ? (
+          <div
+            className={`gantt-bar ${currentStatus}`}
+            style={{
+              left: `${((Math.max(toMinutes(barStartTime), 10 * 60) - 10 * 60) / (9 * 60)) * 100}%`,
+              width: `${Math.max(
+                ((Math.min(toMinutes(barEndTime), 19 * 60) -
+                  Math.max(toMinutes(barStartTime), 10 * 60)) /
+                  (9 * 60)) *
+                  100,
+                4
+              )}%`,
+            }}
+            title={`${getStaffDisplayName(staff)}さん ${formatTimeRange(barStartTime, barEndTime)}`}
+          >
+            {canEditTime ? (
+              <>
+                <span className="gantt-time-start">{" "}{normalizeDisplayTime(barStartTime)}</span>
+                <span className="gantt-center-stack">
+                  <span className="gantt-time-center">
+                    {formatTimeRange(barStartTime, barEndTime)}
+                  </span>
+                  {displayShift.breakMinutes > 0 ? (
+                    <span className="gantt-break">
+                      <span className="gantt-break-mark">休</span>
+                      <span>{formatMinutes(displayShift.breakMinutes)}</span>
+                    </span>
+                  ) : null}
+                </span>
+                <span className="gantt-time-end">{normalizeDisplayTime(barEndTime)}{" "}</span>
+                <span
+                  className="gantt-handle start"
+                  onPointerDown={(e) => {
+                    if (!editableDesired) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const track = e.currentTarget.closest(".timeline-track-gantt") as HTMLDivElement | null;
+                    if (!track) return;
+                    onDragHandleDown(editableDesired.id, "start", track, barStartTime, barEndTime);
+                  }}
+                />
+                <span
+                  className="gantt-handle end"
+                  onPointerDown={(e) => {
+                    if (!editableDesired) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const track = e.currentTarget.closest(".timeline-track-gantt") as HTMLDivElement | null;
+                    if (!track) return;
+                    onDragHandleDown(editableDesired.id, "end", track, barStartTime, barEndTime);
+                  }}
+                />
+              </>
+            ) : (
+              <>
+                <span className="gantt-time-start">{" "}{normalizeDisplayTime(displayShift.startTime)}</span>
+                <span className="gantt-center-stack">
+                  <span className="gantt-time-center">
+                    {formatTimeRange(displayShift.startTime, displayShift.endTime)}
+                  </span>
+                </span>
+                <span className="gantt-time-end">{normalizeDisplayTime(displayShift.endTime)}{" "}</span>
+              </>
+            )}
+          </div>
+        ) : (
+          <div style={{ minHeight: 24 }} />
+        )}
+      </div>
+    </div>
+  );
+});
+
 export function AdminBoard() {
   const {
     state,
@@ -86,10 +416,13 @@ export function AdminBoard() {
     currentUser,
     workers,
     setDesiredShiftStatus,
+    setStaffDayStatus,
     updateDesiredShiftTimes,
     updateConfirmedShift,
     publishConfirmed,
     flushShiftPersist,
+    beginShiftDrag,
+    endShiftDrag,
     upsertRequired,
     setGoalBlocksForDate,
   } = useShift();
@@ -119,10 +452,14 @@ export function AdminBoard() {
   ) => getAdminShiftStatus(confirmedShift, desiredShift);
   const isResubmissionPending = (
     confirmedShift: ConfirmedShift | undefined,
-    desiredShift: (typeof state.desiredShifts)[number] | undefined,
-    date: string
-  ) => hasStaffPendingAdjustment(state.period, confirmedShift, desiredShift, date);
+    desiredShift: (typeof state.desiredShifts)[number] | undefined
+  ) => isAdminResubmissionPending(confirmedShift, desiredShift);
   const [selectedDate, setSelectedDate] = useState(defaultSelectedDateKey);
+  const ganttDate = useDeferredValue(selectedDate);
+  const handleSelectCalendarDate = useCallback((date: string) => {
+    setSelectedDate(date);
+    setViewMode("day");
+  }, []);
   const [selectedWorkerId, setSelectedWorkerId] = useState(state.staffList.find((s) => s.role === "worker")?.id ?? "");
   const [selectedWeekIndex, setSelectedWeekIndex] = useState(0);
   const [requiredEditor, setRequiredEditor] = useState<{
@@ -144,6 +481,15 @@ export function AdminBoard() {
     baseStart: number;
     baseEnd: number;
   } | null>(null);
+  const dragFrameRef = useRef<number | null>(null);
+  const pendingGanttPreviewRef = useRef<{ desiredId: string; startTime: string; endTime: string } | null>(
+    null
+  );
+  const [ganttDragPreview, setGanttDragPreview] = useState<{
+    desiredId: string;
+    startTime: string;
+    endTime: string;
+  } | null>(null);
   useEffect(() => {
     const matchIndex = weekGroups.findIndex((group) => group.includes(selectedDate));
     setSelectedWeekIndex(matchIndex >= 0 ? matchIndex : 0);
@@ -158,39 +504,25 @@ export function AdminBoard() {
     }
   }, [selectedWorkerId, state.staffList]);
 
-  const confirmed = state.confirmedShifts
-    .filter((s) => s.date === selectedDate)
-    .sort((a, b) => a.startTime.localeCompare(b.startTime));
-
-  const desired = state.desiredShifts
-    .filter((s) => s.date === selectedDate)
-    .sort((a, b) => {
-      const aStatus = getAdminShiftStatus(
-        confirmed.find((c) => c.staffId === a.staffId),
-        a
-      );
-      const bStatus = getAdminShiftStatus(
-        confirmed.find((c) => c.staffId === b.staffId),
-        b
-      );
-      const statusDiff = statusRank(aStatus) - statusRank(bStatus);
-      if (statusDiff !== 0) return statusDiff;
-      const aStaff = getStaffDisplayName(workers.find((w) => w.id === a.staffId));
-      const bStaff = getStaffDisplayName(workers.find((w) => w.id === b.staffId));
-      return aStaff.localeCompare(bStaff);
-    });
   const activeWorkers = state.staffList.filter((s) => s.role === "worker" && s.status === "active");
+  const shiftsForGanttDate = useMemo(() => {
+    const desired = new Map<string, DesiredShift>();
+    const confirmed = new Map<string, ConfirmedShift>();
+    for (const shift of state.desiredShifts) {
+      if (shift.date === ganttDate) desired.set(shift.staffId, shift);
+    }
+    for (const shift of state.confirmedShifts) {
+      if (shift.date === ganttDate) confirmed.set(shift.staffId, shift);
+    }
+    return { desired, confirmed };
+  }, [ganttDate, state.confirmedShifts, state.desiredShifts]);
   const dailyRoster = useMemo(
     () =>
       activeWorkers
         .map((staff) => {
-          const desiredShift = state.desiredShifts.find(
-            (shift) => shift.date === selectedDate && shift.staffId === staff.id
-          );
-          const confirmedShift = state.confirmedShifts.find(
-            (shift) => shift.date === selectedDate && shift.staffId === staff.id
-          );
-          const currentStatus = resolveShiftStatus(confirmedShift, desiredShift, selectedDate);
+          const desiredShift = shiftsForGanttDate.desired.get(staff.id);
+          const confirmedShift = shiftsForGanttDate.confirmed.get(staff.id);
+          const currentStatus = getAdminShiftStatus(confirmedShift, desiredShift);
           return { staff, desiredShift, confirmedShift, currentStatus };
         })
         .sort((a, b) => {
@@ -198,7 +530,7 @@ export function AdminBoard() {
           if (statusDiff !== 0) return statusDiff;
           return getStaffDisplayName(a.staff).localeCompare(getStaffDisplayName(b.staff));
         }),
-    [activeWorkers, selectedDate, state.confirmedShifts, state.desiredShifts, state.period]
+    [activeWorkers, shiftsForGanttDate]
   );
 
 
@@ -210,10 +542,13 @@ export function AdminBoard() {
     { label: "18:00", hour: 18 },
   ];
 
-  const required = state.requiredShifts.find((s) => s.date === selectedDate);
+  const required = state.requiredShifts.find((s) => s.date === ganttDate);
   const weeklySummaries = useMemo(
-    () => buildWeeklyStaffSummary(state.staffList, state.desiredShifts, state.confirmedShifts),
-    [state]
+    () =>
+      viewMode === "workers"
+        ? buildWeeklyStaffSummary(state.staffList, state.desiredShifts, state.confirmedShifts)
+        : [],
+    [viewMode, state.staffList, state.desiredShifts, state.confirmedShifts]
   );
   const selectedWeekDates = weekGroups[selectedWeekIndex] ?? [];
   const weeklyViewDesired = useMemo(
@@ -237,23 +572,23 @@ export function AdminBoard() {
     [selectedWeekSummaries]
   );
   const selectedGoalBlocks = useMemo(
-    () => getGoalBlocksForDate(state, selectedDate),
-    [state.goalBlocksByDate, selectedDate]
+    () => getGoalBlocksForDate(state, ganttDate),
+    [state.goalBlocksByDate, ganttDate]
   );
   const goalBlockIconDisplays = useMemo(
     () =>
       buildGoalBlockIconDisplays({
-        date: selectedDate,
+        date: ganttDate,
         goalBlocks: selectedGoalBlocks,
         staffList: state.staffList,
         desiredShifts: state.desiredShifts,
         confirmedShifts: state.confirmedShifts,
       }),
-    [selectedDate, selectedGoalBlocks, state.confirmedShifts, state.desiredShifts, state.staffList]
+    [ganttDate, selectedGoalBlocks, state.confirmedShifts, state.desiredShifts, state.staffList]
   );
   const initialGoalIconFuel = useMemo(
-    () => buildInitialGoalIconFuel(selectedDate, goalBlockIconDisplays),
-    [selectedDate, goalBlockIconDisplays]
+    () => buildInitialGoalIconFuel(ganttDate, goalBlockIconDisplays),
+    [ganttDate, goalBlockIconDisplays]
   );
 
   useEffect(() => {
@@ -266,18 +601,18 @@ export function AdminBoard() {
     const kinds: Record<string, GoalBlockIconKind> = {};
     goalBlockIconDisplays.forEach((block, blockIndex) => {
       block.forEach((icon, slotIndex) => {
-        kinds[buildGoalBlockIconKey(selectedDate, blockIndex, slotIndex, icon.department)] = icon.kind;
+        kinds[buildGoalBlockIconKey(ganttDate, blockIndex, slotIndex, icon.department)] = icon.kind;
       });
     });
     return kinds;
-  }, [goalBlockIconDisplays, selectedDate]);
+  }, [goalBlockIconDisplays, ganttDate]);
 
   const findGoalIconByKey = (iconKey: string) => {
     for (let blockIndex = 0; blockIndex < goalBlockIconDisplays.length; blockIndex += 1) {
       const block = goalBlockIconDisplays[blockIndex];
       for (let slotIndex = 0; slotIndex < block.length; slotIndex += 1) {
         const icon = block[slotIndex];
-        if (buildGoalBlockIconKey(selectedDate, blockIndex, slotIndex, icon.department) === iconKey) {
+        if (buildGoalBlockIconKey(ganttDate, blockIndex, slotIndex, icon.department) === iconKey) {
           return icon;
         }
       }
@@ -317,6 +652,109 @@ export function AdminBoard() {
   );
 
   const operableDepartmentSet = useMemo(() => new Set(operableDepartments), [operableDepartments]);
+
+  const calendarDates = useMemo(() => weekGroups.flat(), [weekGroups]);
+  const calendarDayData = useMemo(() => {
+    const desiredByKey = new Map<string, (typeof state.desiredShifts)[number]>();
+    const confirmedByKey = new Map<string, (typeof state.confirmedShifts)[number]>();
+    for (const shift of state.desiredShifts) {
+      desiredByKey.set(`${shift.date}:${shift.staffId}`, shift);
+    }
+    for (const shift of state.confirmedShifts) {
+      confirmedByKey.set(`${shift.date}:${shift.staffId}`, shift);
+    }
+
+    const requiredNoteByDate = new Map<string, string>();
+    for (const shift of state.requiredShifts) {
+      const note = shift.note?.trim();
+      if (note) requiredNoteByDate.set(shift.date, note);
+    }
+
+    const departmentNames = getGoalDisplayDepartments(masterDepartments);
+    const knownDepartments = new Set(departmentNames);
+    const publishedByDateDept = new Map<string, boolean>();
+    const days = new Map<string, CalendarDayData>();
+
+    for (const date of calendarDates) {
+      const dayRoster = activeWorkers
+        .map((staff) => {
+          const desiredShift = desiredByKey.get(`${date}:${staff.id}`);
+          const confirmedShift = confirmedByKey.get(`${date}:${staff.id}`);
+          const currentStatus = getAdminShiftStatus(confirmedShift, desiredShift);
+          const pendingResubmission = isAdminResubmissionPending(confirmedShift, desiredShift);
+          const shift = resolveAdminShiftDisplay(confirmedShift, desiredShift, { currentStatus }) ?? null;
+          return { staff, currentStatus, shift, pendingResubmission };
+        })
+        .sort((a, b) => getStaffDisplayName(a.staff).localeCompare(getStaffDisplayName(b.staff)));
+
+      const mapEntries = (
+        rows: typeof dayRoster
+      ): CalendarIconEntry[] =>
+        rows.map(({ staff, currentStatus, shift, pendingResubmission }) =>
+          buildCalendarIconEntry(staff, currentStatus, shift, pendingResubmission)
+        );
+
+      const departmentRows = [
+        ...departmentNames.map((department) => ({
+          department,
+          entries: mapEntries(dayRoster.filter(({ staff }) => staff.team === department)),
+        })),
+        ...(dayRoster.some(({ staff }) => !knownDepartments.has(staff.team))
+          ? [
+              {
+                department: "未設定",
+                entries: mapEntries(dayRoster.filter(({ staff }) => !knownDepartments.has(staff.team))),
+              },
+            ]
+          : []),
+      ];
+
+      for (const department of departmentNames) {
+        publishedByDateDept.set(
+          `${date}:${department}`,
+          isDepartmentCalendarDatePublished(
+            date,
+            department,
+            state.period,
+            state.staffList,
+            state.confirmedShifts,
+            { knownDepartments }
+          )
+        );
+      }
+      if (dayRoster.some(({ staff }) => !knownDepartments.has(staff.team))) {
+        publishedByDateDept.set(
+          `${date}:未設定`,
+          isDepartmentCalendarDatePublished(
+            date,
+            "未設定",
+            state.period,
+            state.staffList,
+            state.confirmedShifts,
+            { knownDepartments }
+          )
+        );
+      }
+
+      days.set(date, {
+        departmentRows,
+        dayMemos: getGoalMemosForDate(state.goalMemos, date),
+        dayRequiredNote: requiredNoteByDate.get(date) ?? "",
+      });
+    }
+
+    return { days, publishedByDateDept };
+  }, [
+    activeWorkers,
+    calendarDates,
+    masterDepartments,
+    state.confirmedShifts,
+    state.desiredShifts,
+    state.goalMemos,
+    state.period,
+    state.requiredShifts,
+    state.staffList,
+  ]);
 
   const csvDepartmentOptions = useMemo(
     () => getGoalDisplayDepartments(masterDepartments),
@@ -537,7 +975,7 @@ export function AdminBoard() {
     () => {
       const requiredByDepartment = getDepartmentRequiredMinutes(selectedGoalBlocks);
       return buildDepartmentDaySummaries({
-        date: selectedDate,
+        date: ganttDate,
         departments: masterDepartments,
         goalBlocks: selectedGoalBlocks,
         staffList: state.staffList,
@@ -546,7 +984,31 @@ export function AdminBoard() {
         requiredByDepartment,
       });
     },
-    [masterDepartments, selectedDate, selectedGoalBlocks, state.confirmedShifts, state.desiredShifts, state.staffList]
+    [masterDepartments, ganttDate, selectedGoalBlocks, state.confirmedShifts, state.desiredShifts, state.staffList]
+  );
+  const handleEditRequiredHours = useCallback(
+    (date: string) => {
+      const departments = getGoalDisplayDepartments(masterDepartments);
+      const goalBlocks = getGoalBlocksForDate(state, date);
+      const requiredByDepartment = getDepartmentRequiredMinutes(goalBlocks);
+      const departmentHours = Object.fromEntries(
+        departments.map((department) => [
+          department,
+          departmentMinutesToHoursInput(requiredByDepartment[department] ?? 0),
+        ])
+      );
+      const saved = state.requiredShifts.find((s) => s.date === date);
+      const memoText = getGoalMemosForDate(state.goalMemos, date)
+        .map((memo) => memo.body.trim())
+        .filter(Boolean)
+        .join("\n");
+      setRequiredEditor({
+        date,
+        departmentHours,
+        note: saved?.note?.trim() ? saved.note : memoText,
+      });
+    },
+    [masterDepartments, state]
   );
   const formatDateWithWeekday = (date: string) => {
     const d = new Date(`${date}T00:00:00+09:00`);
@@ -559,7 +1021,57 @@ export function AdminBoard() {
     return `${String(hour).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
   };
 
+  const handleGanttRowStatusChange = useCallback(
+    (
+      staffId: string,
+      date: string,
+      nextStatus: ConfirmedShift["status"],
+      desiredShift: DesiredShift | undefined,
+      confirmedShift: ConfirmedShift | undefined
+    ) => {
+      if (desiredShift) {
+        setDesiredShiftStatus(desiredShift.id, nextStatus);
+        return;
+      }
+      if (confirmedShift) {
+        updateConfirmedShift(confirmedShift.id, { status: nextStatus });
+        return;
+      }
+      setStaffDayStatus(staffId, date, nextStatus);
+    },
+    [setDesiredShiftStatus, setStaffDayStatus, updateConfirmedShift]
+  );
+
+  const handleGanttDragHandleDown = useCallback(
+    (
+      desiredId: string,
+      edge: "start" | "end",
+      track: HTMLDivElement,
+      barStartTime: string,
+      barEndTime: string
+    ) => {
+      beginShiftDrag();
+      setGanttDragPreview(null);
+      pendingGanttPreviewRef.current = null;
+      dragRef.current = {
+        desiredId,
+        edge,
+        rect: track.getBoundingClientRect(),
+        baseStart: toMinutes(barStartTime),
+        baseEnd: toMinutes(barEndTime),
+      };
+    },
+    [beginShiftDrag]
+  );
+
   useEffect(() => {
+    const flushPendingGanttPreview = () => {
+      dragFrameRef.current = null;
+      const pending = pendingGanttPreviewRef.current;
+      if (!pending) return;
+      setGanttDragPreview(pending);
+    };
+
     const handlePointerMove = (event: PointerEvent) => {
       const drag = dragRef.current;
       if (!drag) return;
@@ -568,45 +1080,51 @@ export function AdminBoard() {
       const snapped = 15 * Math.round((10 * 60 + ratio * 9 * 60) / 15);
       if (edge === "start") {
         const nextStart = Math.min(snapped, baseEnd - 15);
-        updateDesiredShiftTimes(desiredId, minuteToTime(nextStart), minuteToTime(baseEnd));
-        return;
+        pendingGanttPreviewRef.current = {
+          desiredId,
+          startTime: minuteToTime(nextStart),
+          endTime: minuteToTime(baseEnd),
+        };
+      } else {
+        const nextEnd = Math.max(snapped, baseStart + 15);
+        pendingGanttPreviewRef.current = {
+          desiredId,
+          startTime: minuteToTime(baseStart),
+          endTime: minuteToTime(nextEnd),
+        };
       }
-      const nextEnd = Math.max(snapped, baseStart + 15);
-      updateDesiredShiftTimes(desiredId, minuteToTime(baseStart), minuteToTime(nextEnd));
+      if (dragFrameRef.current !== null) return;
+      dragFrameRef.current = window.requestAnimationFrame(flushPendingGanttPreview);
     };
 
     const handlePointerUp = () => {
+      if (dragFrameRef.current !== null) {
+        window.cancelAnimationFrame(dragFrameRef.current);
+        flushPendingGanttPreview();
+      }
+      const preview = pendingGanttPreviewRef.current;
+      if (dragRef.current && preview) {
+        updateDesiredShiftTimes(preview.desiredId, preview.startTime, preview.endTime);
+      }
       if (dragRef.current) {
+        endShiftDrag();
         void flushShiftPersist();
       }
       dragRef.current = null;
+      pendingGanttPreviewRef.current = null;
+      setGanttDragPreview(null);
     };
 
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", handlePointerUp);
     return () => {
+      if (dragFrameRef.current !== null) {
+        window.cancelAnimationFrame(dragFrameRef.current);
+      }
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
-  }, [updateDesiredShiftTimes, flushShiftPersist]);
-  const handleEditRequiredHours = (date: string) => {
-    const departments = getGoalDisplayDepartments(masterDepartments);
-    const goalBlocks = getGoalBlocksForDate(state, date);
-    const requiredByDepartment = getDepartmentRequiredMinutes(goalBlocks);
-    const departmentHours = Object.fromEntries(
-      departments.map((department) => [department, departmentMinutesToHoursInput(requiredByDepartment[department] ?? 0)])
-    );
-    const saved = state.requiredShifts.find((s) => s.date === date);
-    const memoText = getGoalMemosForDate(state.goalMemos, date)
-      .map((memo) => memo.body.trim())
-      .filter(Boolean)
-      .join("\n");
-    setRequiredEditor({
-      date,
-      departmentHours,
-      note: saved?.note?.trim() ? saved.note : memoText,
-    });
-  };
+  }, [updateDesiredShiftTimes, flushShiftPersist, endShiftDrag]);
 
   const handleSaveRequired = () => {
     if (!requiredEditor) return;
@@ -696,156 +1214,20 @@ export function AdminBoard() {
                   data-week-index={weekIndex}
                 >
                   {group.map((date) => {
-                    const dayRoster = state.staffList
-                      .filter((s) => s.role === "worker" && s.status === "active")
-                      .map((staff) => {
-                        const desiredShift = state.desiredShifts.find(
-                          (shift) => shift.date === date && shift.staffId === staff.id
-                        );
-                        const confirmedShift = state.confirmedShifts.find(
-                          (shift) => shift.date === date && shift.staffId === staff.id
-                        );
-                        const currentStatus = resolveShiftStatus(confirmedShift, desiredShift, date);
-                        const pendingResubmission = isResubmissionPending(confirmedShift, desiredShift, date);
-                        const shift = resolveAdminShiftDisplay(confirmedShift, desiredShift, { currentStatus }) ?? null;
-                        return { staff, desiredShift, confirmedShift, currentStatus, pendingResubmission, shift };
-                      })
-                      .sort((a, b) => getStaffDisplayName(a.staff).localeCompare(getStaffDisplayName(b.staff)));
-                    const departmentNames = getGoalDisplayDepartments(masterDepartments);
-                    const knownDepartments = new Set(departmentNames);
-                    const departmentRows = [
-                      ...departmentNames.map((department) => ({
-                        department,
-                        entries: dayRoster.filter(({ staff }) => staff.team === department),
-                      })),
-                      ...(
-                        dayRoster.some(({ staff }) => !knownDepartments.has(staff.team))
-                          ? [
-                              {
-                                department: "未設定",
-                                entries: dayRoster.filter(({ staff }) => !knownDepartments.has(staff.team)),
-                              },
-                            ]
-                          : []
-                      ),
-                    ];
-                    const dayMemos = getGoalMemosForDate(state.goalMemos, date);
-                    const dayRequiredNote = state.requiredShifts.find((shift) => shift.date === date)?.note?.trim() ?? "";
+                    const dayData = calendarDayData.days.get(date);
+                    if (!dayData) return null;
                     return (
-                      <div
+                      <AdminCalendarDayCell
                         key={date}
-                        className={`day-cell${selectedDate === date ? " selected" : ""}${weekIndex < currentWeekIndex ? " past" : ""}`}
-                        onClick={() => {
-                          setSelectedDate(date);
-                          setViewMode("day");
-                        }}
-                      >
-                        <div className="day-cell-top">
-                          <div className="day-cell-date-line">
-                            <div className="day-num">{formatDateShort(date)}</div>
-                            {dayMemos.length > 0 ? (
-                              <div className="day-cell-memos">
-                                {dayMemos.map((memo) => (
-                                  <span key={memo.id} className="day-cell-memo" title={memo.body}>
-                                    {memo.body}
-                                  </span>
-                                ))}
-                              </div>
-                            ) : null}
-                            {dayRequiredNote ? (
-                              <span className="day-cell-required-note" title={dayRequiredNote}>
-                                {dayRequiredNote}
-                              </span>
-                            ) : null}
-                          </div>
-                          <button
-                            type="button"
-                            className="btn day-cell-edit-btn"
-                            aria-label="目安時間を編集"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleEditRequiredHours(date);
-                            }}
-                          >
-                            <Icons.Pencil size={10} strokeWidth={2.2} />
-                          </button>
-                        </div>
-                        <div className="day-meta day-status-strip">
-                          {departmentRows.map(({ department, entries }, index) => {
-                            const isPublished = isDepartmentCalendarDatePublished(
-                              date,
-                              department,
-                              state.period,
-                              state.staffList,
-                              state.confirmedShifts,
-                              { knownDepartments }
-                            );
-                            return (
-                              <div
-                                key={department}
-                                className={`day-status-row department-row${isPublished ? " published" : ""}`}
-                                style={{ borderBottom: index < departmentRows.length - 1 ? "1px solid var(--line)" : undefined }}
-                              >
-                                <div className="day-status-row-icons">
-                                  {entries.map(({ staff, currentStatus, shift, pendingResubmission }) => {
-                                    const statusColor = getShiftStatusRingColor(currentStatus);
-                                    const startPct = shift
-                                      ? Math.max(
-                                          0,
-                                          Math.min(1, (Math.max(toMinutes(shift.startTime), 10 * 60) - 10 * 60) / (8 * 60))
-                                        )
-                                      : 0;
-                                    const endPct = shift
-                                      ? Math.max(
-                                          0,
-                                          Math.min(1, (Math.min(toMinutes(shift.endTime), 18 * 60) - 10 * 60) / (8 * 60))
-                                        )
-                                      : 0;
-                                    const spanPct = Math.max(0, endPct - startPct);
-                                    const iconChar = getStaffDisplayInitial(staff);
-                                    const isRemote = currentStatus === "remote";
-                                    const progressDasharray = isRemote
-                                      ? buildRemoteRingDashArray(spanPct)
-                                      : `${spanPct} ${1 - spanPct}`;
-                                    return (
-                                      <span
-                                        key={staff.id}
-                                        className={`day-status-icon-cell${pendingResubmission ? " pending" : ""}`}
-                                      >
-                                        <span
-                                          className={`day-status-icon ${currentStatus}`}
-                                          title={`${getStaffDisplayName(staff)}さん${isRemote ? "（在宅）" : ""}`}
-                                        >
-                                        <svg className="day-status-ring" viewBox="0 0 20 20" aria-hidden="true">
-                                          <circle cx="10" cy="10" r="7.5" fill="none" stroke="#e5e7eb" strokeWidth="2" />
-                                          {shift && spanPct > 0 ? (
-                                            <circle
-                                              className="day-status-ring-progress"
-                                              cx="10"
-                                              cy="10"
-                                              r="7.5"
-                                              fill="none"
-                                              stroke={statusColor}
-                                              strokeWidth={isRemote ? 1.6 : 2}
-                                              strokeLinecap={isRemote ? "butt" : "round"}
-                                              pathLength={1}
-                                              strokeDasharray={progressDasharray}
-                                              strokeDashoffset={-startPct}
-                                              transform="rotate(-90 10 10)"
-                                            />
-                                          ) : null}
-                                        </svg>
-                                        <span className="day-status-initial">{iconChar}</span>
-                                      </span>
-                                    </span>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
+                        date={date}
+                        weekIndex={weekIndex}
+                        currentWeekIndex={currentWeekIndex}
+                        selected={selectedDate === date}
+                        dayData={dayData}
+                        publishedByDateDept={calendarDayData.publishedByDateDept}
+                        onSelectDate={handleSelectCalendarDate}
+                        onEditRequired={handleEditRequiredHours}
+                      />
                     );
                   })}
                 </div>
@@ -984,7 +1366,7 @@ export function AdminBoard() {
         <div className="gantt-headline">
           <h2 className="page-title-with-icon" style={{ marginTop: 0 }}>
             <Icons.Calendar size={18} className="page-title-icon" />
-            {formatDateWithWeekday(selectedDate)}
+            {formatDateWithWeekday(ganttDate)}
           </h2>
           <div className="stack" style={{ gap: 4 }}>
             <div className="gantt-headline-departments">
@@ -1017,7 +1399,7 @@ export function AdminBoard() {
         </div>
       </section>
 
-      <div className="department-sections-grid">
+      <div className={`department-sections-grid${ganttDate !== selectedDate ? " gantt-loading" : ""}`}>
         {departmentSections.length === 0 ? (
           <section className="panel stack">
             <p style={{ margin: 0 }}>表示する所属がありません。</p>
@@ -1033,7 +1415,7 @@ export function AdminBoard() {
               <div className="department-section-header">
                 <div className="department-section-title-text">
                   <strong>{department}</strong>
-                  <span className="muted">{formatDateWithWeekday(selectedDate)}</span>
+                  <span className="muted">{formatDateWithWeekday(ganttDate)}</span>
                   {!canOperate ? <span className="badge">閲覧のみ</span> : null}
                 </div>
                 <button
@@ -1078,7 +1460,7 @@ export function AdminBoard() {
                               )
                               .map(({ icon, slotIndex }) => {
                                 const iconKey = buildGoalBlockIconKey(
-                                  selectedDate,
+                                  ganttDate,
                                   index,
                                   slotIndex,
                                   icon.department
@@ -1162,155 +1544,27 @@ export function AdminBoard() {
                       {entries.length === 0 ? (
                         <div className="muted">この日のシフトはありません。</div>
                       ) : (
-                        entries.map(({ staff, desiredShift, confirmedShift, currentStatus }) => {
-                          const editableDesired = desiredShift;
-                          const displayShift = resolveAdminShiftDisplay(confirmedShift, desiredShift, {
-                            currentStatus,
-                          });
-                          const canEditStatus = canOperate && Boolean(editableDesired || confirmedShift);
-                          const canEditTime =
-                            canOperate && currentStatus !== "unconfirmed" && Boolean(editableDesired);
-                          return (
-                            <div key={staff.id} className="timeline-row timeline-row-gantt">
-                              <div className="timeline-worker-name">
-                                <select
-                                  className={`status-select timeline-status-select ${currentStatus}`}
-                                  value={currentStatus}
-                                  onChange={(e) => {
-                                    if (!canEditStatus) return;
-                                    const nextStatus = e.target.value as ConfirmedShift["status"];
-                                    if (editableDesired) {
-                                      setDesiredShiftStatus(editableDesired.id, nextStatus);
-                                      return;
-                                    }
-                                    if (confirmedShift) {
-                                      updateConfirmedShift(confirmedShift.id, { status: nextStatus });
-                                    }
-                                  }}
-                                  disabled={!canEditStatus}
-                                >
-                                  <option value="confirmed">出社</option>
-                                  <option value="remote">在宅</option>
-                                  <option value="adjusting">調整</option>
-                                  <option value="unconfirmed">休み</option>
-                                </select>
-                                <div className="timeline-worker-meta">
-                                  <span className="timeline-worker-name-row">
-                                    <span>{getStaffDisplayName(staff)}</span>
-                                    {(displayShift?.note)?.trim() ? (
-                                      <span
-                                        className="gantt-worker-note-alert"
-                                        tabIndex={0}
-                                        aria-label={`備考: ${(displayShift?.note || "").trim()}`}
-                                      >
-                                        <Icons.Alert size={18} strokeWidth={2.6} />
-                                        <span className="gantt-worker-note-tooltip" role="tooltip">
-                                          {(displayShift?.note || "").trim()}
-                                        </span>
-                                      </span>
-                                    ) : null}
-                                  </span>
-                                  <span className="timeline-week-hours">
-                                    週合計 {formatMinutes(selectedWeekSummaryMap.get(staff.id)?.confirmedMinutes ?? 0)}
-                                  </span>
-                                </div>
-                              </div>
-                              <div className="timeline-track timeline-track-gantt">
-                                <div className="timeline-grid-lines">
-                                  {[10, 12, 14, 16, 18].map((hour) => (
-                                    <span
-                                      key={hour}
-                                      className="timeline-grid-line"
-                                      style={{ left: `${((hour - 10) / 9) * 100}%` }}
-                                    />
-                                  ))}
-                                </div>
-                                {displayShift ? (
-                                  <>
-                                    <div
-                                      className={`gantt-bar ${currentStatus}`}
-                                      style={{
-                                        left: `${((Math.max(toMinutes(displayShift.startTime), 10 * 60) - 10 * 60) / (9 * 60)) * 100}%`,
-                                        width: `${Math.max(
-                                          ((Math.min(toMinutes(displayShift.endTime), 19 * 60) -
-                                            Math.max(toMinutes(displayShift.startTime), 10 * 60)) /
-                                            (9 * 60)) *
-                                            100,
-                                          4
-                                        )}%`,
-                                      }}
-                                      title={`${getStaffDisplayName(staff)}さん ${formatTimeRange(displayShift.startTime, displayShift.endTime)}`}
-                                    >
-                                      {canEditTime ? (
-                                        <>
-                                          <span className="gantt-time-start">{" "}{normalizeDisplayTime(displayShift.startTime)}</span>
-                                          <span className="gantt-center-stack">
-                                            <span className="gantt-time-center">
-                                              {formatTimeRange(displayShift.startTime, displayShift.endTime)}
-                                            </span>
-                                            {displayShift.breakMinutes > 0 ? (
-                                              <span className="gantt-break">
-                                                <span className="gantt-break-mark">休</span>
-                                                <span>{formatMinutes(displayShift.breakMinutes)}</span>
-                                              </span>
-                                            ) : null}
-                                          </span>
-                                          <span className="gantt-time-end">{normalizeDisplayTime(displayShift.endTime)}{" "}</span>
-                                          <span
-                                            className="gantt-handle start"
-                                            onPointerDown={(e) => {
-                                              if (!editableDesired) return;
-                                              e.preventDefault();
-                                              e.stopPropagation();
-                                              const track = e.currentTarget.closest(".timeline-track-gantt") as HTMLDivElement | null;
-                                              if (!track) return;
-                                              dragRef.current = {
-                                                desiredId: editableDesired.id,
-                                                edge: "start",
-                                                rect: track.getBoundingClientRect(),
-                                                baseStart: toMinutes(editableDesired.startTime),
-                                                baseEnd: toMinutes(editableDesired.endTime),
-                                              };
-                                            }}
-                                          />
-                                          <span
-                                            className="gantt-handle end"
-                                            onPointerDown={(e) => {
-                                              if (!editableDesired) return;
-                                              e.preventDefault();
-                                              e.stopPropagation();
-                                              const track = e.currentTarget.closest(".timeline-track-gantt") as HTMLDivElement | null;
-                                              if (!track) return;
-                                              dragRef.current = {
-                                                desiredId: editableDesired.id,
-                                                edge: "end",
-                                                rect: track.getBoundingClientRect(),
-                                                baseStart: toMinutes(editableDesired.startTime),
-                                                baseEnd: toMinutes(editableDesired.endTime),
-                                              };
-                                            }}
-                                          />
-                                        </>
-                                      ) : (
-                                        <>
-                                          <span className="gantt-time-start">{" "}{normalizeDisplayTime(displayShift.startTime)}</span>
-                                          <span className="gantt-center-stack">
-                                            <span className="gantt-time-center">
-                                              {formatTimeRange(displayShift.startTime, displayShift.endTime)}
-                                            </span>
-                                          </span>
-                                          <span className="gantt-time-end">{normalizeDisplayTime(displayShift.endTime)}{" "}</span>
-                                        </>
-                                      )}
-                                    </div>
-                                  </>
-                                ) : (
-                                  <div style={{ minHeight: 24 }} />
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })
+                        entries.map(({ staff, desiredShift, confirmedShift, currentStatus }) => (
+                          <AdminGanttRow
+                            key={staff.id}
+                            staff={staff}
+                            desiredShift={desiredShift}
+                            confirmedShift={confirmedShift}
+                            currentStatus={currentStatus}
+                            dragPreview={
+                              ganttDragPreview && desiredShift?.id === ganttDragPreview.desiredId
+                                ? ganttDragPreview
+                                : null
+                            }
+                            canOperate={canOperate}
+                            weekConfirmedMinutes={
+                              selectedWeekSummaryMap.get(staff.id)?.confirmedMinutes ?? 0
+                            }
+                            ganttDate={ganttDate}
+                            onStatusChange={handleGanttRowStatusChange}
+                            onDragHandleDown={handleGanttDragHandleDown}
+                          />
+                        ))
                       )}
                     </div>
                   </div>

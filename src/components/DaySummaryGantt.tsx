@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getStaffDisplayName } from "@/lib/shift/display";
 import { formatDateShort } from "@/lib/shift/dates";
 import { getGoalDepartmentLabel } from "@/lib/shift/goal";
-import { getStaffShiftStatus } from "@/lib/shift/publish-state";
+import { getStaffShiftStatus, resolveAdminShiftDisplay } from "@/lib/shift/publish-state";
 import { getShiftStatusLabel, isAttendanceStatus } from "@/lib/shift/status";
 import { formatMinutes, formatTimeRange, normalizeDisplayTime, toMinutes } from "@/lib/shift/time";
 import type { ConfirmedShift, DesiredShift, Staff } from "@/lib/shift/types";
@@ -51,7 +51,12 @@ function buildEntriesForDate(
       const currentStatus = getStaffShiftStatus(confirmedShift, desiredShift);
       return { staff, desiredShift, confirmedShift, currentStatus };
     })
-    .filter((entry) => Boolean(entry.desiredShift || entry.confirmedShift))
+    .filter((entry) => {
+      const displayShift = resolveAdminShiftDisplay(entry.confirmedShift, entry.desiredShift, {
+        currentStatus: entry.currentStatus,
+      });
+      return Boolean(displayShift);
+    })
     .sort((a, b) => {
       const statusDiff = statusRank(a.currentStatus) - statusRank(b.currentStatus);
       if (statusDiff !== 0) return statusDiff;
@@ -94,8 +99,8 @@ function DayGanttBlock({
             この日のシフトはありません。
           </div>
         ) : (
-          entries.map(({ staff, desiredShift, currentStatus }) => {
-            const shift = desiredShift;
+          entries.map(({ staff, desiredShift, confirmedShift, currentStatus }) => {
+            const shift = resolveAdminShiftDisplay(confirmedShift, desiredShift, { currentStatus });
             return (
               <div key={`${date}-${staff.id}`} className="timeline-row timeline-row-gantt">
                 <div className="timeline-worker-name">

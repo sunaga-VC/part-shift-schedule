@@ -1,8 +1,9 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import { useActionState, useEffect, useState } from "react";
-import { loginAction, type LoginActionState } from "@/app/login/actions";
+import { useState, type FormEvent } from "react";
+import { createClient } from "@/lib/supabase/client";
+import { normalizeEmailInput } from "@/lib/shift/email";
 
 function initialError(searchParams: URLSearchParams): string | null {
   const code = searchParams.get("error");
@@ -15,27 +16,72 @@ function initialError(searchParams: URLSearchParams): string | null {
   return null;
 }
 
+function resolveRedirectPath(next: string | null): string {
+  const target = (next ?? "").trim();
+  if (target.startsWith("/") && !target.startsWith("//")) {
+    return target;
+  }
+  return "/";
+}
+
 export function LoginForm() {
   const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [queryError] = useState(() => initialError(searchParams));
-  const [state, formAction, pending] = useActionState<LoginActionState | null, FormData>(
-    loginAction,
-    queryError ? { error: queryError } : null
-  );
+  const [error, setError] = useState<string | null>(() => initialError(searchParams));
+  const [pending, setPending] = useState(false);
 
-  const error = state?.error ?? null;
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setPending(true);
+    setError(null);
 
-  useEffect(() => {
-    if (state?.redirectTo) {
-      window.location.assign(state.redirectTo);
+    const normalizedEmail = normalizeEmailInput(email);
+    if (!normalizedEmail || !password) {
+      setError("メールアドレスとパスワードを入力してください。");
+      setPending(false);
+      return;
     }
-  }, [state?.redirectTo]);
+
+    try {
+      const supabase = createClient();
+      const signInPromise = supabase.auth.signInWithPassword({
+        email: normalizedEmail,
+        password,
+      });
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        window.setTimeout(() => reject(new Error("timeout")), 15000);
+      });
+
+      const { error: signInError } = await Promise.race([signInPromise, timeoutPromise]);
+
+      if (signInError) {
+        setError(
+          signInError.message === "Invalid login credentials"
+            ? "メールまたはパスワードが正しくありません。"
+            : signInError.message
+        );
+        return;
+      }
+
+      window.location.assign(resolveRedirectPath(searchParams.get("next")));
+    } catch (caught) {
+      if (caught instanceof Error && caught.message === "timeout") {
+        setError("ログインがタイムアウトしました。dev サーバーを再起動してから再度お試しください。");
+        return;
+      }
+      setError(
+        caught instanceof Error && caught.message.includes("環境変数")
+          ? caught.message
+          : "ログインに失敗しました。ネットワーク接続を確認してください。"
+      );
+    } finally {
+      setPending(false);
+    }
+  }
 
   return (
-    <form className="login-form stack" action={formAction}>
-      <input type="hidden" name="next" value={searchParams.get("next") ?? ""} />
+    <form className="login-form stack" onSubmit={(event) => void handleSubmit(event)}>
       <label>
         メールアドレス
         <input

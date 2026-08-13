@@ -4,12 +4,15 @@
   "version": "0.1.0",
   "scripts": {
     "dev": "next dev",
+    "dev:clean": "node -e \"try{require('fs').rmSync('.next',{recursive:true,force:true})}catch(e){}\" && next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
     "db:patch-schema": "node scripts/apply-schema-patches.mjs",
     "auth:reset": "node scripts/reset-auth-accounts.mjs",
-    "auth:sync": "node scripts/sync-auth-users.mjs"
+    "auth:sync": "node scripts/sync-auth-users.mjs",
+    "staff:provision-interns": "node scripts/provision-intern-staff.mjs",
+    "auth:fix-manager": "node scripts/fix-manager-login.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.4",

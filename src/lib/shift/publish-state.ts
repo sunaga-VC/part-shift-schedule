@@ -35,21 +35,24 @@ export function isDepartmentWeekPublished(
 }
 
 export function isRestConfirmedShift(confirmed: ConfirmedShift): boolean {
+  if (confirmed.status === "adjusting") return false;
   return (
     confirmed.status === "unconfirmed" ||
     (confirmed.startTime === "09:00" && confirmed.endTime === "09:01")
   );
 }
 
-/** 公開済みの確定シフトか（週単位の公開も含む） */
+/** 公開済みの確定シフトか（当該日の confirmed が公開されているか） */
 export function isWorkerPublishedShift(
   period: ShiftPeriod,
   confirmed: ConfirmedShift | undefined,
   date: string,
   workerPublishedDates?: readonly string[]
 ): boolean {
+  void period;
+  void date;
   if (workerPublishedDates?.includes(date)) return true;
-  return Boolean(confirmed?.publishedAt) || isPublishedWeekDate(period, date);
+  return Boolean(confirmed?.publishedAt);
 }
 
 function getDeptWorkerIds(
@@ -175,13 +178,12 @@ export function hasWishChangedAfterPublish(
   desired: DesiredShift | undefined
 ): boolean {
   if (!confirmed?.publishedAt) return false;
-  if (confirmed.status === "unconfirmed") return false;
   if (!desired) {
     if (isRestConfirmedShift(confirmed)) return false;
     return isAttendanceStatus(confirmed.status);
   }
-  // 管理者が確定時刻を調整しただけでは調整中にしない（公開後の希望更新のみ）
   if (desired.updatedAt <= confirmed.publishedAt) return false;
+  if (isRestConfirmedShift(confirmed)) return true;
   return (
     desired.startTime !== confirmed.startTime ||
     desired.endTime !== confirmed.endTime ||
@@ -189,7 +191,44 @@ export function hasWishChangedAfterPublish(
   );
 }
 
-/** 公開済み確定後の再提出・再調整が必要か */
+/**
+ * 確定後に「もう一度確定」が必要か（管理者の赤セル）。
+ * ステータスとは独立し、確定ボタンで publishedAt が更新されるまで true。
+ */
+export function needsRepublishAfterConfirm(
+  confirmed: ConfirmedShift | undefined,
+  desired: DesiredShift | undefined
+): boolean {
+  if (!confirmed?.publishedAt) return false;
+  if (confirmed.updatedAt > confirmed.publishedAt) return true;
+  return hasWishChangedAfterPublish(confirmed, desired);
+}
+
+/**
+ * アルバイトの希望が、管理者の確認・確定に未反映か。
+ * - 希望のみ（初回提出）→ true（管理者画面では「調整」で入る）
+ * - 確定公開後の再提出 → true
+ * - 確定前: 管理者がステータスを反映済みで希望に追従していない → false
+ */
+export function hasUnreviewedWorkerWish(
+  confirmed: ConfirmedShift | undefined,
+  desired: DesiredShift | undefined
+): boolean {
+  if (!desired) {
+    if (confirmed?.publishedAt) {
+      return hasWishChangedAfterPublish(confirmed, undefined);
+    }
+    return false;
+  }
+  if (!confirmed) return true;
+  if (confirmed.publishedAt) {
+    return hasWishChangedAfterPublish(confirmed, desired);
+  }
+  if (confirmed.status === "adjusting") return true;
+  return desired.updatedAt > confirmed.updatedAt;
+}
+
+/** 確定週で、公開済み内容に対する再提出・未反映希望があるか（アルバイト赤表示・管理者赤セル） */
 export function hasStaffPendingAdjustment(
   period: ShiftPeriod,
   confirmed: ConfirmedShift | undefined,
@@ -197,8 +236,22 @@ export function hasStaffPendingAdjustment(
   date: string,
   workerPublishedDates?: readonly string[]
 ): boolean {
-  if (!isWorkerPublishedShift(period, confirmed, date, workerPublishedDates)) return false;
-  return hasWishChangedAfterPublish(confirmed, desired);
+  void period;
+  const wasPublishedForDisplay =
+    Boolean(confirmed?.publishedAt) || Boolean(workerPublishedDates?.includes(date));
+  if (!wasPublishedForDisplay) return false;
+  if (confirmed?.publishedAt) {
+    return needsRepublishAfterConfirm(confirmed, desired);
+  }
+  return hasUnreviewedWorkerWish(confirmed, desired);
+}
+
+/** 管理者カレンダー: 確定後の再確定待ち（赤セル表示） */
+export function isAdminResubmissionPending(
+  confirmed: ConfirmedShift | undefined,
+  desired: DesiredShift | undefined
+): boolean {
+  return needsRepublishAfterConfirm(confirmed, desired);
 }
 
 export type WorkerShiftDisplay =
@@ -207,7 +260,7 @@ export type WorkerShiftDisplay =
   | { kind: "wish"; shift: DesiredShift; pending: boolean }
   | { kind: "empty"; pending: boolean };
 
-/** アルバイト画面: 確定公開後は確定シフトを優先表示 */
+/** アルバイト画面: 確定反映済みは青、未反映の希望は赤 */
 export function resolveWorkerShiftDisplay(
   period: ShiftPeriod,
   confirmed: ConfirmedShift | undefined,
@@ -215,15 +268,25 @@ export function resolveWorkerShiftDisplay(
   date: string,
   workerPublishedDates?: readonly string[]
 ): WorkerShiftDisplay {
-  const pending = hasStaffPendingAdjustment(period, confirmed, desired, date, workerPublishedDates);
-  const published = isWorkerPublishedShift(period, confirmed, date, workerPublishedDates);
+  void period;
+  void workerPublishedDates;
+  void date;
+  const shiftPublished = Boolean(confirmed?.publishedAt);
+  const pendingAfterPublish =
+    shiftPublished && hasWishChangedAfterPublish(confirmed, desired);
+  const unreviewed = hasUnreviewedWorkerWish(confirmed, desired);
 
-  if (pending) {
+  if (pendingAfterPublish) {
     if (desired) return { kind: "wish", shift: desired, pending: true };
     return { kind: "empty", pending: true };
   }
 
-  if (published && !pending) {
+  if (unreviewed) {
+    if (desired) return { kind: "wish", shift: desired, pending: false };
+    return { kind: "empty", pending: false };
+  }
+
+  if (shiftPublished) {
     if (!confirmed || isRestConfirmedShift(confirmed)) {
       return { kind: "rest", pending: false };
     }
@@ -236,9 +299,8 @@ export function resolveWorkerShiftDisplay(
 
 /**
  * 管理者画面のステータス表示・編集用。
- * - 希望あり → 週確定（publishedAt）前後を問わず「調整」（確定ボタンで反映されるまで）
- * - 公開後に希望が確定内容と異なる → 調整
- * - 希望なし・休み確定 → 休み
+ * - 初回提出など未確定の希望 → 調整
+ * - 確定後の編集 → 管理者が選んだステータス（弧の色）。赤セルは needsRepublishAfterConfirm
  */
 export function getAdminShiftStatus(
   confirmed: ConfirmedShift | undefined,
@@ -246,9 +308,18 @@ export function getAdminShiftStatus(
 ): ConfirmedShift["status"] {
   if (!confirmed && !desired) return "unconfirmed";
 
-  if (desired) {
-    if (!confirmed?.publishedAt) return "adjusting";
-    if (hasWishChangedAfterPublish(confirmed, desired)) return "adjusting";
+  if (confirmed?.publishedAt && needsRepublishAfterConfirm(confirmed, desired)) {
+    if (desired && hasWishChangedAfterPublish(confirmed, desired)) {
+      if (isAttendanceStatus(confirmed.status)) return confirmed.status;
+      return "adjusting";
+    }
+    if (isAttendanceStatus(confirmed.status)) return confirmed.status;
+    if (isRestConfirmedShift(confirmed)) return "unconfirmed";
+    return "adjusting";
+  }
+
+  if (hasUnreviewedWorkerWish(confirmed, desired)) {
+    return "adjusting";
   }
 
   if (!confirmed) return "unconfirmed";
