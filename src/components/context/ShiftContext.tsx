@@ -48,6 +48,7 @@ import type {
   ShiftPeriod,
   Staff,
 } from "@/lib/shift/types";
+import { parseLoginEmail, normalizeEmailInput } from "@/lib/shift/email";
 
 
 type StaffEditableFields = Pick<
@@ -111,6 +112,30 @@ function normalizeStaff(staff: Staff): Staff {
     hourlyWage,
     salaryHistory,
   };
+}
+
+async function patchStaffLoginEmail(
+  staffId: string,
+  rawEmail: string
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const parsed = parseLoginEmail(rawEmail);
+  if (!parsed.ok) {
+    return { ok: false as const, message: parsed.message };
+  }
+  const response = await fetch("/api/staff", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: staffId, email: parsed.email }),
+    credentials: "same-origin",
+  });
+  const payload = await readApiJson<{ ok: boolean; message?: string }>(
+    response,
+    "メールアドレスの更新に失敗しました。"
+  );
+  if (!payload.ok) {
+    return { ok: false as const, message: payload.message || "メールアドレスの更新に失敗しました。" };
+  }
+  return { ok: true as const };
 }
 
 function normalizeDesiredShift(shift: DesiredShift): DesiredShift {
@@ -347,6 +372,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const staffPersistTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const staffPersistPatches = useRef<Record<string, StaffPersistPatch>>({});
+  const loadedAuthUserIdRef = useRef<string | null>(null);
   const latestShiftSnapshotRef = useRef<ShiftPersistenceSnapshot>(buildShiftPersistenceSnapshot(createEmptyAppState()));
   const lastShiftPersistSignatureRef = useRef("");
   const shiftPersistInFlightRef = useRef(0);
@@ -479,21 +505,9 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       try {
         const { email: nextEmail, ...profilePatch } = patch;
         if (typeof nextEmail === "string") {
-          const email = nextEmail.trim().toLowerCase();
-          if (email) {
-            const response = await fetch("/api/staff", {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ id: staffId, email }),
-              credentials: "same-origin",
-            });
-            const payload = await readApiJson<{ ok: boolean; message?: string }>(
-              response,
-              "メールアドレスの更新に失敗しました。"
-            );
-            if (!payload.ok) {
-              return { ok: false as const, message: payload.message || "メールアドレスの更新に失敗しました。" };
-            }
+          const emailResult = await patchStaffLoginEmail(staffId, nextEmail);
+          if (!emailResult.ok) {
+            return emailResult;
           }
         }
 
@@ -568,10 +582,18 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     let authSubscription: { unsubscribe: () => void } | null = null;
 
-    async function applyAuthUser(userId: string | null) {
+    async function applyAuthUser(userId: string | null, force = false) {
       if (!userId) {
+        loadedAuthUserIdRef.current = null;
         if (!cancelled) {
           setState(createEmptyAppState());
+          setReady(true);
+        }
+        return;
+      }
+
+      if (!force && loadedAuthUserIdRef.current === userId) {
+        if (!cancelled) {
           setReady(true);
         }
         return;
@@ -586,6 +608,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         const remote = await reloadRemoteAppData();
         if (cancelled) return;
 
+        loadedAuthUserIdRef.current = userId;
         lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remote.shiftSnapshot);
 
         setState({
@@ -621,7 +644,15 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
         const { data } = supabase.auth.onAuthStateChange((event, session) => {
           if (event === "INITIAL_SESSION") return;
-          if (event === "SIGNED_IN" || event === "SIGNED_OUT" || event === "USER_UPDATED") {
+          if (event === "SIGNED_OUT") {
+            void applyAuthUser(null);
+            return;
+          }
+          if (event === "USER_UPDATED") {
+            void applyAuthUser(session?.user?.id ?? null, true);
+            return;
+          }
+          if (event === "SIGNED_IN") {
             void applyAuthUser(session?.user?.id ?? null);
           }
         });
@@ -950,7 +981,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       };
     });
 
-    const { password: _password, salaryHistory: _salaryHistory, ...persistable } = patch;
+    const { password: _password, salaryHistory: _salaryHistory, email: _email, ...persistable } = patch;
     if (Object.keys(persistable).length === 0) return;
 
     staffPersistPatches.current[staffId] = {
@@ -964,29 +995,10 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       const merged = staffPersistPatches.current[staffId];
       delete staffPersistPatches.current[staffId];
       delete staffPersistTimers.current[staffId];
-      if (!merged) return;
+      if (!merged || Object.keys(merged).length === 0) return;
       void (async () => {
         try {
-          const { email: nextEmail, ...profilePatch } = merged;
-          if (typeof nextEmail === "string") {
-            const email = nextEmail.trim().toLowerCase();
-            if (email) {
-              const response = await fetch("/api/staff", {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ id: staffId, email }),
-              });
-              const payload = (await response.json()) as { ok: boolean; message?: string };
-              if (!payload.ok) {
-                window.alert(payload.message || "メールアドレスの更新に失敗しました。");
-                return;
-              }
-            }
-          }
-
-          if (Object.keys(profilePatch).length === 0) return;
-
-          const result = await persistStaffPatchViaApi(staffId, profilePatch);
+          const result = await persistStaffPatchViaApi(staffId, merged);
           if (!result.ok) {
             console.error("staff_profiles update failed", result.message);
             window.alert(`スタッフ情報の保存に失敗しました: ${result.message}`);
@@ -1038,16 +1050,15 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       try {
         const { email: nextEmail, ...profilePatch } = persistable;
         if (typeof nextEmail === "string") {
-          const email = nextEmail.trim().toLowerCase();
-          if (email) {
-            const response = await fetch("/api/staff", {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ id: staffId, email }),
-            });
-            const payload = (await response.json()) as { ok: boolean; message?: string };
-            if (!payload.ok) {
-              return { ok: false as const, message: payload.message || "メールアドレスの更新に失敗しました。" };
+          const parsed = parseLoginEmail(nextEmail);
+          if (!parsed.ok) {
+            return { ok: false as const, message: parsed.message };
+          }
+          const currentEmail = normalizeEmailInput(target?.email ?? "");
+          if (parsed.email !== currentEmail) {
+            const emailResult = await patchStaffLoginEmail(staffId, nextEmail);
+            if (!emailResult.ok) {
+              return emailResult;
             }
           }
         }
@@ -1308,10 +1319,11 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   }, [refreshStaffFromSupabase]);
 
   const createStaff = useCallback(async (input: StaffEditableFields) => {
-    const email = (input.email ?? "").trim().toLowerCase();
-    if (!email) {
-      return { ok: false as const, message: "ログイン用メールアドレスを入力してください。" };
+    const emailParsed = parseLoginEmail(input.email ?? "");
+    if (!emailParsed.ok) {
+      return { ok: false as const, message: emailParsed.message };
     }
+    const email = emailParsed.email;
     if (!input.password?.trim()) {
       return { ok: false as const, message: "パスワードを入力してください。" };
     }

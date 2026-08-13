@@ -3,6 +3,7 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { getServiceClient, resolveStaffProfileForAuthUser } from "@/lib/supabase/adminApi";
+import { normalizeEmailInput } from "@/lib/shift/email";
 
 export type LoginActionState = {
   error?: string;
@@ -29,7 +30,7 @@ export async function loginAction(
   _prevState: LoginActionState | null,
   formData: FormData
 ): Promise<LoginActionState> {
-  const email = String(formData.get("email") ?? "").trim().toLowerCase();
+  const email = normalizeEmailInput(String(formData.get("email") ?? ""));
   const password = String(formData.get("password") ?? "");
   const next = String(formData.get("next") ?? "").trim();
 
@@ -39,13 +40,7 @@ export async function loginAction(
 
   const supabase = await createClient();
 
-  try {
-    await supabase.auth.signOut({ scope: "global" });
-  } catch {
-    // ignore
-  }
-
-  const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+  const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({ email, password });
   if (signInError) {
     return {
       error:
@@ -55,11 +50,8 @@ export async function loginAction(
     };
   }
 
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser();
-  if (userError || !user) {
+  const user = signInData.user;
+  if (!user) {
     return { error: "ログインに失敗しました。" };
   }
 

@@ -9,6 +9,7 @@ import { formatDateLong, formatDateShort } from "@/lib/shift/dates";
 import { getStaffDisplayName } from "@/lib/shift/display";
 import {
   hasStaffPendingAdjustment,
+  isRestConfirmedShift,
   isWorkerCalendarDatePublished,
   resolveWorkerShiftDisplay,
 } from "@/lib/shift/publish-state";
@@ -59,13 +60,6 @@ export function WishCalendarPage() {
   const selectedDateConfirmedShift = state.confirmedShifts.find(
     (s) => s.staffId === currentUser?.id && s.date === selectedDate
   );
-  const selectedDateDisplay = resolveWorkerShiftDisplay(
-    state.period,
-    selectedDateConfirmedShift,
-    myWish,
-    selectedDate,
-    workerPublishedDates
-  );
 
   function isPublishedCalendarDate(date: string) {
     return isWorkerCalendarDatePublished(
@@ -80,18 +74,38 @@ export function WishCalendarPage() {
     );
   }
 
-  function renderDayTime(
+  function resolveCalendarShiftDisplay(
     date: string,
-    mine: typeof myWish,
-    confirmedShift: typeof selectedDateConfirmedShift
+    confirmedShift: typeof selectedDateConfirmedShift,
+    mine: typeof myWish
   ) {
-    const display = resolveWorkerShiftDisplay(
+    if (isWorkerView && isPublishedCalendarDate(date) && confirmedShift) {
+      if (isRestConfirmedShift(confirmedShift)) {
+        return { kind: "rest" as const, pending: false };
+      }
+      return { kind: "confirmed" as const, shift: confirmedShift, pending: false };
+    }
+    return resolveWorkerShiftDisplay(
       state.period,
       confirmedShift,
       mine,
       date,
       workerPublishedDates
     );
+  }
+
+  const selectedDateDisplay = resolveCalendarShiftDisplay(
+    selectedDate,
+    selectedDateConfirmedShift,
+    myWish
+  );
+
+  function renderDayTime(
+    date: string,
+    mine: typeof myWish,
+    confirmedShift: typeof selectedDateConfirmedShift
+  ) {
+    const display = resolveCalendarShiftDisplay(date, confirmedShift, mine);
     if (display.kind === "rest") {
       return <span className="muted">休み</span>;
     }
@@ -384,20 +398,31 @@ export function WishCalendarPage() {
                       (s) => s.staffId === currentUser?.id && s.date === date
                     );
                     const isPublishedDate = isPublishedCalendarDate(date);
-                    const isPendingAdjustment = hasStaffPendingAdjustment(
-                      state.period,
-                      confirmedShift,
-                      mine,
-                      date,
-                      workerPublishedDates
-                    );
+                    const isPendingAdjustment =
+                      !isWorkerView &&
+                      hasStaffPendingAdjustment(
+                        state.period,
+                        confirmedShift,
+                        mine,
+                        date,
+                        workerPublishedDates
+                      );
+                    const dateCellStatusClass = isWorkerView
+                      ? isPublishedDate
+                        ? " published-date"
+                        : ""
+                      : isPendingAdjustment
+                        ? " pending-adjustment-date"
+                        : isPublishedDate
+                          ? " published-date"
+                          : "";
                     return (
                       <button
                         key={date}
                         type="button"
                         className={`day-cell${selectedDate === date ? " selected" : ""}${
                           weekIndex < currentWeekIndex ? " past" : ""
-                        }${isPendingAdjustment ? " pending-adjustment-date" : isPublishedDate ? " published-date" : ""}`}
+                        }${dateCellStatusClass}`}
                         onClick={() => selectDate(date)}
                       >
                         <div

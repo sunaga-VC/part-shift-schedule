@@ -12,6 +12,7 @@ import { removeOrphanAuthUserForEmail } from "@/lib/supabase/syncAuthUsers";
 import { canManageAdminAccounts, normalizeAdminPermission } from "@/lib/shift/permissions";
 import type { AdminPermission } from "@/lib/shift/types";
 import { persistStaffUpdate, persistStaffDelete, type StaffPersistPatch } from "@/lib/supabase/staff";
+import { parseLoginEmail } from "@/lib/shift/email";
 
 type ServiceClient = NonNullable<ReturnType<typeof getServiceClient>>;
 
@@ -84,7 +85,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, message: "リクエスト形式が正しくありません。" }, { status: 400 });
   }
 
-  const email = body.email?.trim().toLowerCase() ?? "";
+  const emailParsed = parseLoginEmail(body.email ?? "");
+  if (!emailParsed.ok) {
+    return NextResponse.json({ ok: false, message: emailParsed.message }, { status: 400 });
+  }
+  const email = emailParsed.email;
   const password = body.password?.trim() ?? "";
   const name = body.name?.trim() ?? "";
   const role = body.role === "admin" ? "admin" : "worker";
@@ -292,7 +297,7 @@ async function applyAuthCredentialPatch(
   password: string,
   email?: string
 ): Promise<NextResponse> {
-  const nextEmail = email?.trim().toLowerCase() ?? "";
+  const nextEmail = email ?? "";
   const emailChanging = Boolean(nextEmail) && nextEmail !== profileEmail.trim().toLowerCase();
 
   let authUser: { id: string; email: string | null } | null = null;
@@ -432,7 +437,14 @@ export async function PATCH(request: Request) {
   const body = (await request.json()) as UpdateAuthBody;
   const staffId = body.id?.trim() ?? "";
   const password = body.password?.trim() ?? "";
-  const email = body.email?.trim().toLowerCase() ?? "";
+  let email = "";
+  if (body.email !== undefined && String(body.email).trim()) {
+    const emailParsed = parseLoginEmail(String(body.email));
+    if (!emailParsed.ok) {
+      return NextResponse.json({ ok: false, message: emailParsed.message }, { status: 400 });
+    }
+    email = emailParsed.email;
+  }
 
   if (!staffId || (!password && !email)) {
     return NextResponse.json(
@@ -446,10 +458,6 @@ export async function PATCH(request: Request) {
       { ok: false, message: "パスワードは6文字以上にしてください。" },
       { status: 400 }
     );
-  }
-
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return NextResponse.json({ ok: false, message: "メールアドレスの形式が正しくありません。" }, { status: 400 });
   }
 
   // 自分自身のパスワード変更（一般管理者・スタッフも可）

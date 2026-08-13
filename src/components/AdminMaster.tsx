@@ -113,13 +113,11 @@ function formatSlashDate(date: string): string {
 export function AdminMaster() {
   const {
     state,
-    ready,
     isAdmin,
     canManageMaster,
     canManageAdminAccounts,
     updateStaff,
     saveStaffProfile,
-    refreshStaffFromSupabase,
     createStaff,
     changeStaffPassword,
     flushStaffPersistForStaff,
@@ -140,18 +138,13 @@ export function AdminMaster() {
 
   const defaultStaffTeam = teamDepartments[0] ?? "";
 
-  useEffect(() => {
-    if (ready) {
-      void refreshStaffFromSupabase();
-    }
-  }, [ready, refreshStaffFromSupabase]);
-
   const [newDepartment, setNewDepartment] = useState("");
   const [tab, setTab] = useState<"staff" | "admin">("staff");
   const [addStaffOpen, setAddStaffOpen] = useState(false);
   const [addAdminOpen, setAddAdminOpen] = useState(false);
   const [addTeamOpen, setAddTeamOpen] = useState(false);
   const [editingAdminId, setEditingAdminId] = useState<string | null>(null);
+  const [adminEmailDraft, setAdminEmailDraft] = useState("");
   const [adminPasswordDraft, setAdminPasswordDraft] = useState("");
   const [editingDepartment, setEditingDepartment] = useState<string | null>(null);
   const [departmentDraft, setDepartmentDraft] = useState("");
@@ -176,10 +169,20 @@ export function AdminMaster() {
   const [newStaff, setNewStaff] = useState<NewStaffForm>(() => emptyStaffForm(""));
 
   const finishAdminEdit = async (adminId: string): Promise<boolean> => {
+    const admin = state.staffList.find((staff) => staff.id === adminId);
     const flushResult = await flushStaffPersistForStaff(adminId);
     if (!flushResult.ok) {
       window.alert(flushResult.message);
       return false;
+    }
+
+    const trimmedEmailDraft = adminEmailDraft.trim();
+    if (trimmedEmailDraft !== (admin?.email ?? "").trim()) {
+      const emailResult = await saveStaffProfile(adminId, { email: trimmedEmailDraft });
+      if (!emailResult.ok) {
+        window.alert(emailResult.message);
+        return false;
+      }
     }
 
     const nextPassword = adminPasswordDraft.trim();
@@ -191,6 +194,7 @@ export function AdminMaster() {
       }
     }
 
+    setAdminEmailDraft("");
     setAdminPasswordDraft("");
     setEditingAdminId((prev) => (prev === adminId ? null : prev));
     return true;
@@ -208,6 +212,7 @@ export function AdminMaster() {
       setTab("staff");
       setAddAdminOpen(false);
       setEditingAdminId(null);
+      setAdminEmailDraft("");
     }
   }, [canManageAdminAccounts, tab]);
 
@@ -611,8 +616,8 @@ export function AdminMaster() {
                           <input
                             className="master-input"
                             type="email"
-                            value={admin.email}
-                            onChange={(e) => updateStaff(admin.id, { email: e.target.value })}
+                            value={adminEmailDraft}
+                            onChange={(e) => setAdminEmailDraft(e.target.value)}
                             placeholder="login@example.com"
                           />
                         ) : (
@@ -713,6 +718,7 @@ export function AdminMaster() {
                                   return;
                                 }
                                 setAdminPasswordDraft("");
+                                setAdminEmailDraft(admin.email);
                                 setEditingAdminId(admin.id);
                               })();
                             }}
