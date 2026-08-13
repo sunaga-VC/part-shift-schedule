@@ -1,6 +1,6 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
-import { getServiceClient } from "@/lib/supabase/adminApi";
+import { getServiceClient, resolveStaffProfileForAuthUser } from "@/lib/supabase/adminApi";
 
 function getSupabaseKey() {
   return (
@@ -45,10 +45,18 @@ function redirectTo(request: NextRequest, pathname: string, clearCookies = false
   return response;
 }
 
-function redirectToLogin(request: NextRequest, pathname: string, clearCookies = false) {
+function redirectToLogin(
+  request: NextRequest,
+  pathname: string,
+  clearCookies = false,
+  error?: "profile" | "config"
+) {
   const redirectUrl = request.nextUrl.clone();
   redirectUrl.pathname = "/login";
   redirectUrl.searchParams.set("next", pathname);
+  if (error) {
+    redirectUrl.searchParams.set("error", error);
+  }
   const response = NextResponse.redirect(redirectUrl);
   if (clearCookies) {
     clearAuthCookies(request, response);
@@ -76,6 +84,9 @@ export async function updateSession(request: NextRequest) {
     return supabaseResponse;
   }
   if (pathname.startsWith("/api/bootstrap/")) {
+    return supabaseResponse;
+  }
+  if (pathname.startsWith("/api/health/")) {
     return supabaseResponse;
   }
   const isLoginPage = pathname === "/login";
@@ -166,13 +177,9 @@ export async function updateSession(request: NextRequest) {
 
   // 権限チェック（staff_profiles.role）
   const service = getServiceClient();
-  const { data: profile } = service
-    ? await service
-    .from("staff_profiles")
-    .select("role, admin_permission, status")
-    .eq("email", userEmail)
-    .maybeSingle()
-    : { data: null };
+  const profile = service && user?.id
+    ? await resolveStaffProfileForAuthUser(service, user.id, userEmail)
+    : null;
 
   if (!profile || profile.status !== "active") {
     try {
@@ -183,7 +190,7 @@ export async function updateSession(request: NextRequest) {
     if (isApiRoute(pathname)) {
       return apiJsonError(403, "有効なスタッフプロフィールが見つかりません。", request, true);
     }
-    return redirectToLogin(request, pathname, true);
+    return redirectToLogin(request, pathname, true, "profile");
   }
 
   const isAdmin = profile.role === "admin";

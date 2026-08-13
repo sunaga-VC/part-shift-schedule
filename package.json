@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "db:patch-schema": "node scripts/apply-schema-patches.mjs",
-    "auth:reset": "node scripts/reset-auth-accounts.mjs"
+    "auth:reset": "node scripts/reset-auth-accounts.mjs",
+    "auth:sync": "node scripts/sync-auth-users.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.4",

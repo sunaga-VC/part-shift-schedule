@@ -130,7 +130,39 @@ type AuthenticatedProfileContext =
     }
   | { ok: false; response: NextResponse };
 
-/** ログイン済みユーザー + staff_profiles（email 基準）+ service role */
+type StaffProfileAuthRow = {
+  id: string;
+  role: "worker" | "admin";
+  admin_permission: AdminPermission;
+  status: "active" | "inactive";
+  email: string | null;
+};
+
+/** Auth ユーザーに対応する staff_profiles を解決（ID 優先 → メール） */
+export async function resolveStaffProfileForAuthUser(
+  service: NonNullable<ReturnType<typeof getServiceClient>>,
+  authUserId: string,
+  authEmail: string
+): Promise<StaffProfileAuthRow | null> {
+  const { data: byId } = await service
+    .from("staff_profiles")
+    .select("id, role, admin_permission, status, email")
+    .eq("id", authUserId)
+    .maybeSingle();
+  if (byId) return byId as StaffProfileAuthRow;
+
+  const normalizedEmail = authEmail.trim().toLowerCase();
+  if (!normalizedEmail) return null;
+
+  const { data: byEmail } = await service
+    .from("staff_profiles")
+    .select("id, role, admin_permission, status, email")
+    .eq("email", normalizedEmail)
+    .maybeSingle();
+  return (byEmail as StaffProfileAuthRow | null) ?? null;
+}
+
+/** ログイン済みユーザー + staff_profiles + service role */
 export async function requireAuthenticatedProfileService(): Promise<AuthenticatedProfileContext> {
   const supabase = await createClient();
   const {
@@ -166,11 +198,7 @@ export async function requireAuthenticatedProfileService(): Promise<Authenticate
     };
   }
 
-  const { data: profile } = await service
-    .from("staff_profiles")
-    .select("id, role, admin_permission, status")
-    .eq("email", userEmail)
-    .maybeSingle();
+  const profile = await resolveStaffProfileForAuthUser(service, user.id, userEmail);
 
   if (!profile || profile.status !== "active") {
     return {

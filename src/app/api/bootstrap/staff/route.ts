@@ -12,8 +12,9 @@ export async function GET() {
       data: { user },
     } = await supabase.auth.getUser();
 
-    const email = user?.email?.trim().toLowerCase();
-    if (!email) {
+    const authUserId = user?.id ?? "";
+    const email = user?.email?.trim().toLowerCase() ?? "";
+    if (!authUserId) {
       return NextResponse.json({ ok: false, message: "ログインが必要です。" }, { status: 401 });
     }
 
@@ -51,12 +52,17 @@ export async function GET() {
       managedTeamsByStaffId.set(row.staff_id, list);
     }
 
-    const rawCurrent = (profileResult.data ?? []).find((row) => (row.email ?? "").toLowerCase() === email);
+    const rows = profileResult.data ?? [];
+    let rawCurrent = rows.find((row) => row.id === authUserId);
+    if (!rawCurrent && email) {
+      rawCurrent = rows.find((row) => (row.email ?? "").toLowerCase() === email);
+    }
     if (!rawCurrent) {
       return NextResponse.json(
         {
           ok: false,
-          message: "staff_profiles にこのユーザーの行がありません。",
+          message:
+            "staff_profiles にこのユーザーの行がありません。マスタ管理で登録したログインメールと Auth のメールが一致しているか確認してください。",
         },
         { status: 404 }
       );

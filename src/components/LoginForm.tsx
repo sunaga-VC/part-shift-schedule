@@ -8,11 +8,16 @@ export function LoginForm() {
   const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(() =>
-    searchParams.get("error") === "config"
-      ? "Supabase の環境変数が Vercel に設定されていません。NEXT_PUBLIC_SUPABASE_URL / ANON_KEY を追加して再デプロイしてください。"
-      : null
-  );
+  const [error, setError] = useState<string | null>(() => {
+    const code = searchParams.get("error");
+    if (code === "config") {
+      return "Supabase の環境変数が Vercel に設定されていません。NEXT_PUBLIC_SUPABASE_URL / ANON_KEY を追加して再デプロイしてください。";
+    }
+    if (code === "profile") {
+      return "ログインは成功しましたが、スタッフ情報と紐づいていません。マスタ管理に登録されているログインメールで試すか、管理者に Auth と staff_profiles の同期を依頼してください。";
+    }
+    return null;
+  });
   const [loading, setLoading] = useState(false);
 
   // 失効した refresh token / 前セッションを掃除してから入力できるようにする
@@ -80,7 +85,9 @@ export function LoginForm() {
       const bootstrap = payload.bootstrap;
       const profile = bootstrap?.staffList.find((staff) => staff.id === bootstrap.userId);
       if (!bootstrap || !profile) {
-        setError("staff_profiles にこのユーザーの行がありません。");
+        setError(
+          "staff_profiles にこのユーザーの行がありません。マスタ管理に登録されているログインメールで試してください。メールを変更した場合は、保存後に新しいメールでログインしてください。"
+        );
         setLoading(false);
         return;
       }
