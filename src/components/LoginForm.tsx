@@ -1,7 +1,7 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import { useActionState, useState } from "react";
+import { useActionState, useEffect, useState } from "react";
 import { loginAction, type LoginActionState } from "@/app/login/actions";
 
 function initialError(searchParams: URLSearchParams): string | null {
@@ -26,6 +26,12 @@ export function LoginForm() {
   );
 
   const error = state?.error ?? null;
+
+  useEffect(() => {
+    if (state?.redirectTo) {
+      window.location.assign(state.redirectTo);
+    }
+  }, [state?.redirectTo]);
 
   return (
     <form className="login-form stack" action={formAction}>

@@ -1,6 +1,5 @@
 "use server";
 
-import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { getServiceClient, resolveStaffProfileForAuthUser } from "@/lib/supabase/adminApi";
@@ -8,6 +7,7 @@ import { normalizeEmailInput } from "@/lib/shift/email";
 
 export type LoginActionState = {
   error?: string;
+  redirectTo?: string;
 };
 
 function resolveDestination(input: {
@@ -81,11 +81,11 @@ export async function loginAction(
   }
 
   revalidatePath("/", "layout");
-  redirect(
-    resolveDestination({
+  return {
+    redirectTo: resolveDestination({
       next,
       role: profile.role,
       adminPermission: profile.admin_permission,
-    })
-  );
+    }),
+  };
 }
