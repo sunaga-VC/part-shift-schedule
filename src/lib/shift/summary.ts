@@ -18,9 +18,26 @@ export function getActiveWorkers(staffList: Staff[]): Staff[] {
   return staffList.filter((s) => s.role === "worker" && s.status === "active");
 }
 
+function buildShiftMapByDate<T extends { date: string }>(shifts: T[]): Map<string, T[]> {
+  const map = new Map<string, T[]>();
+  for (const shift of shifts) {
+    const list = map.get(shift.date);
+    if (list) {
+      list.push(shift);
+    } else {
+      map.set(shift.date, [shift]);
+    }
+  }
+  return map;
+}
+
+function buildRequiredShiftMap(requiredShifts: RequiredShiftCount[]): Map<string, RequiredShiftCount> {
+  return new Map(requiredShifts.map((shift) => [shift.date, shift]));
+}
+
 function getRequiredMinutesForDate(
   date: string,
-  requiredShifts: RequiredShiftCount[],
+  requiredByDate: Map<string, RequiredShiftCount>,
   goalBlocksByDate?: AppState["goalBlocksByDate"],
   departmentFilter?: string
 ): { requiredPeople: number; requiredMinutes: number } {
@@ -34,7 +51,7 @@ function getRequiredMinutesForDate(
       }
     } else {
       const iconCount = countGoalIcons(blocks);
-      const required = requiredShifts.find((s) => s.date === date);
+      const required = requiredByDate.get(date);
       if (iconCount > 0) {
         return {
           requiredPeople: required?.requiredPeople ?? 0,
@@ -48,7 +65,7 @@ function getRequiredMinutesForDate(
     return { requiredPeople: 0, requiredMinutes: 0 };
   }
 
-  const required = requiredShifts.find((s) => s.date === date);
+  const required = requiredByDate.get(date);
   return {
     requiredPeople: required?.requiredPeople ?? 0,
     requiredMinutes: required?.requiredMinutes ?? 0,
@@ -62,6 +79,9 @@ export function buildDaySummaries(
   goalBlocksByDate?: AppState["goalBlocksByDate"],
   departmentFilter?: string
 ): ShiftDaySummary[] {
+  const desiredByDate = buildShiftMapByDate(desiredShifts);
+  const confirmedByDate = buildShiftMapByDate(confirmedShifts);
+  const requiredByDate = buildRequiredShiftMap(requiredShifts);
   const dates = new Set<string>();
   for (const shift of desiredShifts) dates.add(shift.date);
   for (const shift of confirmedShifts) dates.add(shift.date);
@@ -80,11 +100,11 @@ export function buildDaySummaries(
   return Array.from(dates)
     .sort()
     .map((date) => {
-      const desiredForDay = desiredShifts.filter((s) => s.date === date);
-      const confirmedForDay = confirmedShifts.filter((s) => s.date === date && Boolean(s.publishedAt));
+      const desiredForDay = desiredByDate.get(date) ?? [];
+      const confirmedForDay = (confirmedByDate.get(date) ?? []).filter((s) => Boolean(s.publishedAt));
       const { requiredPeople, requiredMinutes } = getRequiredMinutesForDate(
         date,
-        requiredShifts,
+        requiredByDate,
         goalBlocksByDate,
         departmentFilter
       );
@@ -113,15 +133,22 @@ export function buildWeeklyStaffSummary(
   options?: { contractWeeks?: number }
 ): StaffWeeklySummary[] {
   const contractWeeks = Math.max(1, options?.contractWeeks ?? 1);
+  const desiredMinutesByStaff = new Map<string, number>();
+  for (const shift of desiredShifts) {
+    desiredMinutesByStaff.set(shift.staffId, (desiredMinutesByStaff.get(shift.staffId) ?? 0) + shift.actualMinutes);
+  }
+
+  const confirmedMinutesByStaff = new Map<string, number>();
+  for (const shift of confirmedShifts) {
+    if (!shift.publishedAt) continue;
+    confirmedMinutesByStaff.set(shift.staffId, (confirmedMinutesByStaff.get(shift.staffId) ?? 0) + shift.actualMinutes);
+  }
+
   return staffList
     .filter((s) => s.role === "worker")
     .map((staff) => {
-      const desiredMinutes = desiredShifts
-        .filter((s) => s.staffId === staff.id)
-        .reduce((t, s) => t + s.actualMinutes, 0);
-      const confirmedMinutes = confirmedShifts
-        .filter((s) => s.staffId === staff.id && Boolean(s.publishedAt))
-        .reduce((t, s) => t + s.actualMinutes, 0);
+      const desiredMinutes = desiredMinutesByStaff.get(staff.id) ?? 0;
+      const confirmedMinutes = confirmedMinutesByStaff.get(staff.id) ?? 0;
       const contractMinutes = staff.weeklyContractHours * 60 * contractWeeks;
 
       return {
@@ -152,7 +179,8 @@ export function buildDashboardStats(
     departmentFilter
   );
   const weekly = buildWeeklyStaffSummary(staffList, desiredShifts, confirmedShifts);
-  const activeWeekly = weekly.filter((w) => workers.some((worker) => worker.id === w.staffId));
+  const activeWorkerIds = new Set(workers.map((worker) => worker.id));
+  const activeWeekly = weekly.filter((w) => activeWorkerIds.has(w.staffId));
 
   const registeredStaffIds = new Set(desiredShifts.map((s) => s.staffId));
   const withWish = workers.filter((w) => registeredStaffIds.has(w.id)).length;

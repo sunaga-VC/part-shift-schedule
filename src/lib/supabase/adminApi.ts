@@ -1,5 +1,6 @@
 import { createClient as createServiceClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
+import { headers } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import type { AdminPermission, Database } from "@/lib/supabase/database.types";
 import { canManageAdminAccounts, canManageMaster } from "@/lib/shift/permissions";
@@ -43,13 +44,26 @@ type MasterContext =
     }
   | { ok: false; response: NextResponse };
 
+async function getRequestUser() {
+  const supabase = await createClient();
+  const {
+    data: { user: cookieUser },
+  } = await supabase.auth.getUser();
+  if (cookieUser) return cookieUser;
+
+  const headerStore = await headers();
+  const raw = headerStore.get("authorization") ?? "";
+  const token = raw.toLowerCase().startsWith("bearer ") ? raw.slice(7).trim() : "";
+  if (!token) return null;
+
+  const { data } = await supabase.auth.getUser(token);
+  return data.user ?? null;
+}
+
 async function requireMasterContext(options?: {
   requireFullManager?: boolean;
 }): Promise<MasterContext> {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const user = await getRequestUser();
   if (!user) {
     return {
       ok: false,
@@ -80,12 +94,7 @@ async function requireMasterContext(options?: {
     };
   }
 
-  const { data: me } = await service
-    .from("staff_profiles")
-    .select("role, admin_permission, status")
-    .eq("email", userEmail)
-    .maybeSingle();
-
+  const me = await resolveStaffProfileForAuthUser(service, user.id, userEmail);
   const permission = (me?.admin_permission ?? "general") as AdminPermission;
   const allowed = options?.requireFullManager
     ? canManageAdminAccounts(permission)
@@ -165,10 +174,7 @@ export async function resolveStaffProfileForAuthUser(
 
 /** ログイン済みユーザー + staff_profiles + service role */
 export async function requireAuthenticatedProfileService(): Promise<AuthenticatedProfileContext> {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const user = await getRequestUser();
   if (!user) {
     return {
       ok: false,

@@ -151,10 +151,16 @@ function isDepartmentDayPublished(
     (staff) => staff.role === "worker" && staff.status === "active" && staff.team === department
   );
   let hasPublishedConfirmed = false;
+  const desiredByStaffId = new Map(
+    desiredShifts.filter((shift) => shift.date === date).map((shift) => [shift.staffId, shift] as const)
+  );
+  const confirmedByStaffId = new Map(
+    confirmedShifts.filter((shift) => shift.date === date).map((shift) => [shift.staffId, shift] as const)
+  );
 
   for (const staff of workers) {
-    const desiredShift = desiredShifts.find((shift) => shift.date === date && shift.staffId === staff.id);
-    const confirmedShift = confirmedShifts.find((shift) => shift.date === date && shift.staffId === staff.id);
+    const desiredShift = desiredByStaffId.get(staff.id);
+    const confirmedShift = confirmedByStaffId.get(staff.id);
     const currentStatus = getStaffShiftStatus(confirmedShift, desiredShift);
     if (currentStatus === "adjusting") return false;
     if (confirmedShift?.publishedAt && isAttendanceStatus(confirmedShift.status)) {
@@ -181,12 +187,25 @@ export function buildDepartmentDaySummaries(input: {
     input.staffList,
     input.confirmedShifts
   );
-  const adjustingByDepartment = buildAdjustingMinutesByDepartment(
-    input.date,
-    input.staffList,
-    input.desiredShifts,
-    input.confirmedShifts
+  const desiredByStaffId = new Map(
+    input.desiredShifts.filter((shift) => shift.date === input.date).map((shift) => [shift.staffId, shift] as const)
   );
+  const confirmedByStaffId = new Map(
+    input.confirmedShifts.filter((shift) => shift.date === input.date).map((shift) => [shift.staffId, shift] as const)
+  );
+  const adjustingByDepartment: Record<string, number> = {};
+
+  for (const staff of input.staffList) {
+    if (staff.role !== "worker" || staff.status !== "active" || !staff.team) continue;
+    const desiredShift = desiredByStaffId.get(staff.id);
+    const confirmedShift = confirmedByStaffId.get(staff.id);
+    const currentStatus = getStaffShiftStatus(confirmedShift, desiredShift);
+    if (currentStatus === "unconfirmed") continue;
+
+    const shift = resolveAdminShiftDisplay(confirmedShift, desiredShift, { currentStatus });
+    if (!shift) continue;
+    adjustingByDepartment[staff.team] = (adjustingByDepartment[staff.team] ?? 0) + shift.actualMinutes;
+  }
 
   return getGoalDisplayDepartments(input.departments).map((department) => {
     const requiredMinutes = requiredByDepartment[department] ?? 0;

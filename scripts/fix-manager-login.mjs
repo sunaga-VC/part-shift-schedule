@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import canonicalAccountData from "../src/lib/supabase/canonicalAuthAccounts.json" with { type: "json" };
 
 function loadEnv() {
   const path = resolve(process.cwd(), ".env.local");
@@ -27,11 +28,15 @@ loadEnv();
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-const EMAIL = "recruiting@example.co.jp";
-const PASSWORD = "admin01";
+const MANAGER_ACCOUNT = canonicalAccountData.accounts.find((account) => account.loginEmail === "recruiting@example.co.jp");
 
 if (!url || !serviceKey || !anonKey) {
   console.error("Missing env vars");
+  process.exit(1);
+}
+
+if (!MANAGER_ACCOUNT) {
+  console.error("Canonical manager account not found");
   process.exit(1);
 }
 
@@ -42,7 +47,7 @@ async function main() {
   const { data: profile, error: profileError } = await service
     .from("staff_profiles")
     .select("id, email, last_name, role, admin_permission, status")
-    .eq("email", EMAIL)
+    .in("email", MANAGER_ACCOUNT.matchEmails)
     .maybeSingle();
   if (profileError) throw profileError;
   console.log("profile:", profile ?? "NOT FOUND");
@@ -50,7 +55,9 @@ async function main() {
 
   const { data: authList, error: listError } = await service.auth.admin.listUsers({ page: 1, perPage: 1000 });
   if (listError) throw listError;
-  const authByEmail = authList.users.find((u) => u.email?.toLowerCase() === EMAIL);
+  const authByEmail = authList.users.find((u) =>
+    MANAGER_ACCOUNT.matchEmails.some((alias) => u.email?.toLowerCase() === alias.toLowerCase())
+  );
   const authById = authList.users.find((u) => u.id === profile.id);
   console.log("auth by email:", authByEmail ? { id: authByEmail.id, email: authByEmail.email } : "NOT FOUND");
   console.log("auth by profile id:", authById ? { id: authById.id, email: authById.email } : "NOT FOUND");
@@ -59,16 +66,16 @@ async function main() {
   if (!authId) {
     const { data: created, error: createError } = await service.auth.admin.createUser({
       id: profile.id,
-      email: EMAIL,
-      password: PASSWORD,
+      email: MANAGER_ACCOUNT.loginEmail,
+      password: MANAGER_ACCOUNT.password,
       email_confirm: true,
     });
     if (createError) throw createError;
     console.log("created auth:", created.user?.id);
   } else {
     const { error: updateError } = await service.auth.admin.updateUserById(authId, {
-      email: EMAIL,
-      password: PASSWORD,
+      email: MANAGER_ACCOUNT.loginEmail,
+      password: MANAGER_ACCOUNT.password,
       email_confirm: true,
     });
     if (updateError) throw updateError;
@@ -78,7 +85,10 @@ async function main() {
     }
   }
 
-  const { error: signInError } = await anon.auth.signInWithPassword({ email: EMAIL, password: PASSWORD });
+  const { error: signInError } = await anon.auth.signInWithPassword({
+    email: MANAGER_ACCOUNT.loginEmail,
+    password: MANAGER_ACCOUNT.password,
+  });
   console.log("login test:", signInError ? signInError.message : "OK");
   await anon.auth.signOut();
 }

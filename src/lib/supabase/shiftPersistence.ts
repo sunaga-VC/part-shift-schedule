@@ -150,7 +150,22 @@ function serializeGoalMemo(periodId: string, memo: GoalMemo): GoalMemoInsert {
   };
 }
 
-function deserializeGoalMemo(row: GoalMemoRow): GoalMemo {
+function deserializeGoalMemo(
+  row: Pick<
+    GoalMemoRow,
+    | "id"
+    | "body"
+    | "start_date"
+    | "end_date"
+    | "frequency"
+    | "weekdays"
+    | "repeat_months"
+    | "monthly_mode"
+    | "month_day"
+    | "month_day_start"
+    | "month_day_end"
+  >
+): GoalMemo {
   return {
     id: row.id,
     body: row.body,
@@ -189,7 +204,10 @@ function serializeGoalBlocks(
   return rows;
 }
 
-function deserializeGoalBlocks(rows: GoalBlockSlotRow[], departmentNameById: Map<string, string>): AppState["goalBlocksByDate"] {
+function deserializeGoalBlocks(
+  rows: Pick<GoalBlockSlotRow, "work_date" | "block_index" | "slot_index" | "department_id">[],
+  departmentNameById: Map<string, string>
+): AppState["goalBlocksByDate"] {
   const grouped: Record<string, [string[], string[], string[], string[]]> = {};
   for (const row of rows.sort((a, b) => {
     if (a.work_date !== b.work_date) return a.work_date.localeCompare(b.work_date);
@@ -293,7 +311,12 @@ export async function loadShiftSnapshotFromSupabase(
   preloadedDepartments?: DepartmentRow[]
 ): Promise<ShiftPersistenceSnapshot> {
   const [latestPeriodResult, departmentsResult] = await Promise.all([
-    supabase.from("shift_periods").select("*").order("created_at", { ascending: false }).limit(1).maybeSingle(),
+    supabase
+      .from("shift_periods")
+      .select("id,adjustment_status,published_week_start_date,published_at,created_at,updated_at")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
     preloadedDepartments
       ? Promise.resolve({ data: preloadedDepartments, error: null as null })
       : supabase.from("departments").select("id, name"),
@@ -313,7 +336,7 @@ export async function loadShiftSnapshotFromSupabase(
         created_at: fallback.period.createdAt,
         updated_at: fallback.period.updatedAt,
       })
-      .select("*")
+      .select("id,adjustment_status,published_week_start_date,published_at,created_at,updated_at")
       .single();
     if (inserted.error) throw inserted.error;
     periodRow = inserted.data;
@@ -323,18 +346,38 @@ export async function loadShiftSnapshotFromSupabase(
   const goalBlockRange = getGoalBlockLoadDateRange(fallback);
   const [desiredResult, confirmedResult, requiredResult, goalBlocksResult, goalMemoResult] =
     await Promise.all([
-      supabase.from("desired_shifts").select("*").eq("period_id", periodId).order("work_date", { ascending: true }),
-      supabase.from("confirmed_shifts").select("*").eq("period_id", periodId).order("work_date", { ascending: true }),
-      supabase.from("required_shifts").select("*").eq("period_id", periodId).order("work_date", { ascending: true }),
+      supabase
+        .from("desired_shifts")
+        .select("id,staff_id,period_id,work_date,start_time,end_time,break_minutes,actual_minutes,note,created_at,updated_at")
+        .eq("period_id", periodId)
+        .order("work_date", { ascending: true }),
+      supabase
+        .from("confirmed_shifts")
+        .select(
+          "id,staff_id,period_id,work_date,status,start_time,end_time,break_minutes,actual_minutes,note,admin_note,published_at,created_at,updated_at"
+        )
+        .eq("period_id", periodId)
+        .order("work_date", { ascending: true }),
+      supabase
+        .from("required_shifts")
+        .select("id,period_id,work_date,required_people,required_minutes,note,created_at,updated_at")
+        .eq("period_id", periodId)
+        .order("work_date", { ascending: true }),
       supabase
         .from("goal_block_slots")
-        .select("*")
+        .select("work_date,block_index,slot_index,department_id")
         .gte("work_date", goalBlockRange.start)
         .lte("work_date", goalBlockRange.end)
         .order("work_date", { ascending: true })
         .order("block_index", { ascending: true })
         .order("slot_index", { ascending: true }),
-      supabase.from("goal_memos").select("*").eq("period_id", periodId).order("start_date", { ascending: true }),
+      supabase
+        .from("goal_memos")
+        .select(
+          "id,period_id,body,start_date,end_date,frequency,weekdays,repeat_months,monthly_mode,month_day,month_day_start,month_day_end"
+        )
+        .eq("period_id", periodId)
+        .order("start_date", { ascending: true }),
     ]);
   if (desiredResult.error) throw desiredResult.error;
   if (confirmedResult.error) throw confirmedResult.error;
@@ -426,7 +469,7 @@ export async function persistShiftSnapshotToSupabase(
 
   const { count: existingConfirmedCount, error: existingConfirmedError } = await supabase
     .from("confirmed_shifts")
-    .select("*", { count: "exact", head: true })
+    .select("id", { count: "exact", head: true })
     .eq("period_id", periodId);
   if (existingConfirmedError) throw existingConfirmedError;
   if ((existingConfirmedCount ?? 0) > 0 && confirmedRows.length === 0) {
@@ -473,7 +516,7 @@ async function resolveCanonicalPeriod(
 ): Promise<{ periodId: string; period: ShiftPeriod }> {
   const { data: latestRow, error } = await supabase
     .from("shift_periods")
-    .select("*")
+    .select("id,adjustment_status,published_week_start_date,published_at,created_at,updated_at")
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -501,7 +544,7 @@ async function resolveCanonicalPeriod(
       created_at: snapshot.period.createdAt,
       updated_at: snapshot.period.updatedAt,
     })
-    .select("*")
+    .select("id,adjustment_status,published_week_start_date,published_at,created_at,updated_at")
     .single();
   if (inserted.error) throw inserted.error;
   return { periodId: inserted.data.id, period: deserializePeriod(inserted.data) };

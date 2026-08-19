@@ -80,8 +80,8 @@ export function computeDepartmentPublishedDates(
   department: string,
   options?: { knownDepartments?: ReadonlySet<string> }
 ): string[] {
-  const weekStarts = new Set<string>();
   const deptWorkerIds = getDeptWorkerIds(department, staffList, options?.knownDepartments);
+  const weekStarts = new Set<string>();
 
   for (const shift of confirmedShifts) {
     if (!shift.publishedAt) continue;
@@ -90,15 +90,13 @@ export function computeDepartmentPublishedDates(
   }
 
   if (period.publishedWeekStartDate) {
-    const weekDates = getWeekDates(period.publishedWeekStartDate);
-    const publishedInWeek = confirmedShifts.some(
-      (shift) =>
-        Boolean(shift.publishedAt) &&
-        weekDates.includes(shift.date) &&
-        deptWorkerIds.has(shift.staffId)
-    );
-    if (publishedInWeek) {
+    const weekDates = new Set(getWeekDates(period.publishedWeekStartDate));
+    for (const shift of confirmedShifts) {
+      if (!shift.publishedAt) continue;
+      if (!weekDates.has(shift.date)) continue;
+      if (!deptWorkerIds.has(shift.staffId)) continue;
       weekStarts.add(period.publishedWeekStartDate);
+      break;
     }
   }
 
@@ -141,9 +139,7 @@ export function computeWorkerPublishedDates(
   workerTeam: string,
   options?: { knownDepartments?: ReadonlySet<string> }
 ): string[] {
-  const dates = new Set(
-    computeDepartmentPublishedDates(period, staffList, confirmedShifts, workerTeam, options)
-  );
+  const dates = new Set(computeDepartmentPublishedDates(period, staffList, confirmedShifts, workerTeam, options));
 
   for (const shift of confirmedShifts) {
     if (!shift.publishedAt || shift.staffId !== staffId) continue;

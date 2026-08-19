@@ -1,36 +1,23 @@
 import type { getServiceClient } from "@/lib/supabase/adminApi";
 import { formatAuthUpdateError } from "@/lib/supabase/adminApi";
+import canonicalAccountData from "./canonicalAuthAccounts.json";
 
 type ServiceClient = NonNullable<ReturnType<typeof getServiceClient>>;
 
+type CanonicalAccountConfig = (typeof canonicalAccountData.accounts)[number];
+
 /** ログイン可能な正規アカウント（これ以外の Auth は削除） */
-export const CANONICAL_AUTH_ACCOUNTS = [
-  {
-    loginEmail: "recruiting@example.co.jp",
-    password: "admin01",
-    matchEmails: ["recruiting@example.co.jp"],
-  },
-  {
-    loginEmail: "j_kyo@vegecoop.co.jp",
-    password: "general1",
-    matchEmails: ["j_kyo@vegecoop.co.jp", "help@vegecoop.co.jp", "j_ky@vegecoop.co.jp"],
-  },
-  {
-    loginEmail: "sales1@example.com",
-    password: "pass001",
-    matchEmails: ["shibata@vegecoop.co.jp", "sales1@example.com"],
-  },
-  {
-    loginEmail: "partsaiyo@vegecoop.co.jp",
-    password: "part001",
-    matchEmails: ["partsaiyo@vegecoop.co.jp"],
-  },
-  {
-    loginEmail: "sunaga@vegecoop.co.jp",
-    password: "pass002",
-    matchEmails: ["sunaga@vegegoop.co.jp", "sunaga@vegecoop.co.jp"],
-  },
-] as const;
+export type CanonicalAuthAccount = Pick<CanonicalAccountConfig, "loginEmail" | "password" | "matchEmails">;
+
+export const CANONICAL_AUTH_ACCOUNTS: readonly CanonicalAuthAccount[] = canonicalAccountData.accounts.map(
+  ({ loginEmail, password, matchEmails }) => ({
+    loginEmail,
+    password,
+    matchEmails,
+  })
+);
+
+export const CANONICAL_AUTH_ACCOUNT_CONFIGS: readonly CanonicalAccountConfig[] = canonicalAccountData.accounts;
 
 async function listAllAuthUsers(service: ServiceClient) {
   const users: { id: string; email: string | null }[] = [];

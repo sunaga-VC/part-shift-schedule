@@ -9,7 +9,7 @@ export async function loadHomeMessagesFromSupabase(
 ): Promise<HomeMessage[]> {
   const { data, error } = await supabase
     .from("home_messages")
-    .select("*")
+    .select("id,body,created_at,created_by,audience,department_id")
     .order("created_at", { ascending: false });
   if (error) throw error;
 

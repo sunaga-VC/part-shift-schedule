@@ -87,7 +87,11 @@ export async function loadStaffBootstrapFromService(
     throw new Error(departmentResult.error.message);
   }
 
-  const profileResult = await service.from("staff_profiles").select("*, salary_raises(*)");
+  const profileResult = await service
+    .from("staff_profiles")
+    .select(
+      "id,last_name,first_name,display_given_name,icon_label,department_id,role,admin_permission,status,weekly_contract_hours,social_insurance,hire_date,contract_start_date,contract_end_date,contract_renewal_months,hourly_wage,email,google_email,note,salary_raises(id,effective_date,hourly_wage,note)"
+    );
   if (profileResult.error) {
     throw new Error(profileResult.error.message);
   }
@@ -145,10 +149,14 @@ export async function fetchStaffBootstrap(
       await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
     }
 
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
     const response = await fetch("/api/bootstrap/staff", {
       method: "GET",
       credentials: "same-origin",
       cache: "no-store",
+      headers: session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : undefined,
       signal: AbortSignal.timeout(15000),
     });
     if (response.status === 401 || response.status === 403) {
@@ -457,18 +465,31 @@ export async function persistSalaryRaiseUpdate(
 export async function persistStaffDelete(
   supabase: SupabaseClient,
   staffId: string
-): Promise<{ ok: true } | { ok: false; message: string }> {
-  // 参照制約がある場合は退職扱いにフォールバック
-  const { error: deleteError } = await supabase.from("staff_profiles").delete().eq("id", staffId);
-  if (!deleteError) {
-    return { ok: true };
+): Promise<{ ok: true; deleted: boolean } | { ok: false; message: string }> {
+  const { error: homeMessageError } = await supabase
+    .from("home_messages")
+    .delete()
+    .eq("created_by", staffId);
+  if (homeMessageError) {
+    return { ok: false, message: homeMessageError.message };
   }
-  const { error: inactiveError } = await supabase
-    .from("staff_profiles")
-    .update({ status: "inactive" })
-    .eq("id", staffId);
-  if (inactiveError) {
-    return { ok: false, message: inactiveError.message || deleteError.message };
+
+  const { data: authUser, error: authLookupError } = await supabase.auth.admin.getUserById(staffId);
+  if (authLookupError) {
+    return { ok: false, message: authLookupError.message };
   }
-  return { ok: true };
+
+  if (authUser.user) {
+    const { error: deleteAuthError } = await supabase.auth.admin.deleteUser(staffId);
+    if (deleteAuthError) {
+      return { ok: false, message: deleteAuthError.message };
+    }
+    return { ok: true, deleted: true };
+  }
+
+  const { error: deleteProfileError } = await supabase.from("staff_profiles").delete().eq("id", staffId);
+  if (deleteProfileError) {
+    return { ok: false, message: deleteProfileError.message };
+  }
+  return { ok: true, deleted: true };
 }

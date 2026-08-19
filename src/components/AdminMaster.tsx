@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type SetStateAction } from "react";
 import Link from "next/link";
 import { Icons } from "@/components/icons";
 import { useShift } from "@/components/context/ShiftContext";
+import { createClient } from "@/lib/supabase/client";
 import { toDateKeyJst } from "@/lib/shift/dates";
 import { getStaffFullName } from "@/lib/shift/display";
 import { isFixedDepartmentName, getGoalDepartmentLabel } from "@/lib/shift/goal";
@@ -116,10 +117,12 @@ export function AdminMaster() {
     isAdmin,
     canManageMaster,
     canManageAdminAccounts,
+    currentUser,
     updateStaff,
     saveStaffProfile,
     createStaff,
     changeStaffPassword,
+    refreshStaffFromSupabase,
     flushStaffPersistForStaff,
     addSalaryRaise,
     updateSalaryRaise,
@@ -168,8 +171,13 @@ export function AdminMaster() {
   const [historyEditMessage, setHistoryEditMessage] = useState<string | null>(null);
   const [newStaff, setNewStaff] = useState<NewStaffForm>(() => emptyStaffForm(""));
 
+  useEffect(() => {
+    void refreshStaffFromSupabase();
+  }, [refreshStaffFromSupabase]);
+
   const finishAdminEdit = async (adminId: string): Promise<boolean> => {
     const admin = state.staffList.find((staff) => staff.id === adminId);
+    const isSelf = adminId === currentUser?.id;
     const flushResult = await flushStaffPersistForStaff(adminId);
     if (!flushResult.ok) {
       window.alert(flushResult.message);
@@ -177,6 +185,7 @@ export function AdminMaster() {
     }
 
     const trimmedEmailDraft = adminEmailDraft.trim();
+    const emailChanged = trimmedEmailDraft !== (admin?.email ?? "").trim();
     if (trimmedEmailDraft !== (admin?.email ?? "").trim()) {
       const emailResult = await saveStaffProfile(adminId, { email: trimmedEmailDraft });
       if (!emailResult.ok) {
@@ -197,6 +206,16 @@ export function AdminMaster() {
     setAdminEmailDraft("");
     setAdminPasswordDraft("");
     setEditingAdminId((prev) => (prev === adminId ? null : prev));
+
+    if (isSelf && (emailChanged || Boolean(nextPassword))) {
+      try {
+        const supabase = createClient();
+        await supabase.auth.signOut();
+      } catch {
+        // ローカル環境では無視
+      }
+      window.location.assign("/login");
+    }
     return true;
   };
   const todayKey = useMemo(() => toDateKeyJst(new Date()), []);
@@ -535,9 +554,14 @@ export function AdminMaster() {
             </h1>
             <div className="muted">スタッフ名・契約・給与・所属を管理できます。</div>
           </div>
-          <Link href="/" className="btn">
-            ホームへ
-          </Link>
+          <div className="actions" style={{ marginTop: 0 }}>
+            <button type="button" className="btn" onClick={() => void refreshStaffFromSupabase()}>
+              最新に更新
+            </button>
+            <Link href="/" className="btn">
+              ホームへ
+            </Link>
+          </div>
         </div>
         <div className="staff-mgmt-tabs">
           {canManageAdminAccounts ? (
@@ -608,7 +632,14 @@ export function AdminMaster() {
                             onChange={(e) => updateStaff(admin.id, { name: e.target.value })}
                           />
                         ) : (
-                          <span className="master-display">{admin.name}</span>
+                          <span className="master-display">
+                            {admin.name}
+                            {admin.status !== "active" ? (
+                              <span className="badge warn" style={{ marginLeft: 8 }}>
+                                退職
+                              </span>
+                            ) : null}
+                          </span>
                         )}
                       </td>
                       <td>
@@ -732,7 +763,11 @@ export function AdminMaster() {
                             onClick={() => {
                               void (async () => {
                                 const result = await deleteStaff(admin.id);
-                                if (!result.ok) window.alert(result.message);
+                                if (!result.ok) {
+                                  window.alert(result.message);
+                                  return;
+                                }
+                                window.alert("削除しました。");
                               })();
                             }}
                             aria-label="削除"
@@ -963,7 +998,12 @@ export function AdminMaster() {
                               onClick={() => {
                                 void (async () => {
                                   const result = await deleteStaff(staff.id);
-                                  if (!result.ok) window.alert(result.message);
+                                if (!result.ok) {
+                                  window.alert(result.message);
+                                  return;
+                                }
+                                setStatusFilter("active");
+                                window.alert("削除しました。");
                                 })();
                               }}
                               aria-label="削除"

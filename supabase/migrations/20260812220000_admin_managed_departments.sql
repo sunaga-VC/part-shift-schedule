@@ -1,5 +1,5 @@
 -- このファイルを Supabase SQL Editor に貼り付けて実行してください
--- 対象プロジェクト: voyvdlkvjxvcgbpecupu（part_time アプリ）
+-- 対象プロジェクト: cikpvuadujtbzxjnzkef（part_time アプリ）
 
 create table if not exists public.staff_managed_departments (
   staff_id uuid not null references public.staff_profiles (id) on delete cascade,

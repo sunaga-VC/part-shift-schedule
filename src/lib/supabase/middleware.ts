@@ -126,11 +126,21 @@ export async function updateSession(request: NextRequest) {
   });
 
   const {
-    data: { user },
+    data: { user: cookieUser },
     error,
   } = await supabase.auth.getUser();
 
-  if (isAuthSessionError(error)) {
+  let user = cookieUser;
+  if (!user && isApiRoute(pathname)) {
+    const raw = request.headers.get("authorization") ?? "";
+    const token = raw.toLowerCase().startsWith("bearer ") ? raw.slice(7).trim() : "";
+    if (token) {
+      const tokenResult = await supabase.auth.getUser(token);
+      user = tokenResult.data.user ?? null;
+    }
+  }
+
+  if (!user && isAuthSessionError(error)) {
     try {
       await supabase.auth.signOut({ scope: "local" });
     } catch {

@@ -28,7 +28,7 @@ import { hasWishChangedAfterPublish } from "@/lib/shift/publish-state";
 import { isAttendanceStatus, isPublishedConfirmedShift } from "@/lib/shift/status";
 import { DEFAULT_CONTRACT_RENEWAL_MONTHS } from "@/lib/shift/staffEmployment";
 import { calcActualMinutes, calcBreakMinutes, isValidTimeRange, normalizeDisplayTime } from "@/lib/shift/time";
-import { createClient } from "@/lib/supabase/client";
+import { createClient, fetchWithAuth } from "@/lib/supabase/client";
 import {
   createEmptyAppState,
   createEmptyShiftPersistenceFallback,
@@ -124,7 +124,7 @@ async function patchStaffLoginEmail(
   if (!parsed.ok) {
     return { ok: false as const, message: parsed.message };
   }
-  const response = await fetch("/api/staff", {
+  const response = await fetchWithAuth("/api/staff", {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id: staffId, email: parsed.email }),
@@ -226,7 +226,7 @@ type ShiftContextValue = {
     raiseId: string,
     input: { effectiveDate: string; hourlyWage: number; note: string }
   ) => Promise<{ ok: true } | { ok: false; message: string }>;
-  deleteStaff: (staffId: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+  deleteStaff: (staffId: string) => Promise<{ ok: true; deleted: boolean } | { ok: false; message: string }>;
   addDepartment: (name: string) => Promise<{ ok: true } | { ok: false; message: string }>;
   updateDepartment: (
     oldName: string,
@@ -306,7 +306,7 @@ function buildShiftPersistenceSignature(snapshot: ShiftPersistenceSnapshot): str
 }
 
 async function fetchShiftSnapshotFromApi(): Promise<ShiftPersistenceSnapshot | null> {
-  const response = await fetch("/api/shifts", { credentials: "same-origin" });
+  const response = await fetchWithAuth("/api/shifts", { credentials: "same-origin" });
   if (!response.ok) {
     console.warn("GET /api/shifts failed", response.status);
     return null;
@@ -320,7 +320,7 @@ async function fetchShiftSnapshotFromApi(): Promise<ShiftPersistenceSnapshot | n
 }
 
 async function fetchHomeMessagesFromApi(): Promise<HomeMessage[]> {
-  const response = await fetch("/api/messages", { credentials: "same-origin" });
+  const response = await fetchWithAuth("/api/messages", { credentials: "same-origin" });
   if (!response.ok) return [];
   const payload = (await response.json()) as { ok?: boolean; messages?: HomeMessage[] };
   return payload.ok && Array.isArray(payload.messages) ? payload.messages : [];
@@ -353,7 +353,7 @@ async function fetchAppBootstrapFromApi(options?: { attempts?: number }): Promis
       await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
     }
     try {
-      const response = await fetch("/api/bootstrap/app", {
+      const response = await fetchWithAuth("/api/bootstrap/app", {
         method: "GET",
         credentials: "same-origin",
         cache: "no-store",
@@ -404,7 +404,7 @@ async function reloadRemoteAppData(authUserId: string): Promise<RemoteAppData | 
 }
 
 async function fetchStaffBootstrapFromApi(): Promise<StaffBootstrap | null> {
-  const response = await fetch("/api/bootstrap/staff", {
+  const response = await fetchWithAuth("/api/bootstrap/staff", {
     method: "GET",
     credentials: "same-origin",
     cache: "no-store",
@@ -433,7 +433,7 @@ async function persistStaffPatchViaApi(
   staffId: string,
   patch: StaffPersistPatch
 ): Promise<{ ok: true } | { ok: false; message: string }> {
-  const response = await fetch("/api/staff", {
+  const response = await fetchWithAuth("/api/staff", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id: staffId, patch }),
@@ -555,7 +555,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
             ...snapshot,
             desiredShifts: snapshot.desiredShifts.filter((shift) => shift.staffId === user.id),
           };
-          const response = await fetch("/api/shifts/worker", {
+          const response = await fetchWithAuth("/api/shifts/worker", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ snapshot: workerSnapshot }),
@@ -580,7 +580,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           return { ok: true };
         }
 
-        const response = await fetch("/api/shifts", {
+        const response = await fetchWithAuth("/api/shifts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ snapshot }),
@@ -709,6 +709,27 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       }));
     } catch (error) {
       console.warn("refreshStaffFromSupabase failed", error);
+    }
+  }, []);
+
+  const refreshStaffAndShiftFromSupabase = useCallback(async () => {
+    try {
+      const [bootstrap, remote] = await Promise.all([fetchStaffBootstrapFromApi(), fetchShiftSnapshotFromApi()]);
+      if (bootstrap || remote) {
+        setState((prev) => ({
+          ...prev,
+          ...(remote ?? {}),
+          staffList: bootstrap?.staffList ?? prev.staffList,
+          departments:
+            bootstrap && bootstrap.departments.length > 0 ? bootstrap.departments : prev.departments,
+          currentUserId: bootstrap?.userId ?? prev.currentUserId,
+        }));
+      }
+      if (remote) {
+        lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remote);
+      }
+    } catch (error) {
+      console.warn("refreshStaffAndShiftFromSupabase failed", error);
     }
   }, []);
 
@@ -1358,7 +1379,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           return flushResult;
         }
 
-        const response = await fetch("/api/staff", {
+        const response = await fetchWithAuth("/api/staff", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1407,7 +1428,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       const note = input.note.trim();
 
       try {
-        const response = await fetch("/api/staff/salary-raises", {
+        const response = await fetchWithAuth("/api/staff/salary-raises", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ staffId, effectiveDate, hourlyWage, note }),
@@ -1443,7 +1464,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       const note = input.note.trim();
 
       try {
-        const response = await fetch("/api/staff/salary-raises", {
+        const response = await fetchWithAuth("/api/staff/salary-raises", {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ staffId, raiseId, effectiveDate, hourlyWage, note }),
@@ -1472,7 +1493,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-        const response = await fetch("/api/departments", {
+        const response = await fetchWithAuth("/api/departments", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: trimmed }),
@@ -1503,7 +1524,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     if (oldName === trimmed) return { ok: true as const };
 
     try {
-        const response = await fetch("/api/departments", {
+        const response = await fetchWithAuth("/api/departments", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ oldName, nextName: trimmed }),
@@ -1512,12 +1533,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         if (!payload.ok) {
           return { ok: false as const, message: payload.message || "所属名の変更に失敗しました。" };
         }
-        await refreshStaffFromSupabase();
-        const remote = await fetchShiftSnapshotFromApi();
-        if (remote) {
-          lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remote);
-          setState((prev) => ({ ...prev, ...remote }));
-        }
+        await refreshStaffAndShiftFromSupabase();
         return { ok: true as const };
       } catch (error) {
         return {
@@ -1525,7 +1541,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           message: error instanceof Error ? error.message : "所属名の変更に失敗しました。",
         };
       }
-  }, [refreshStaffFromSupabase]);
+  }, [refreshStaffAndShiftFromSupabase]);
 
   const deleteDepartment = useCallback(async (name: string) => {
     if (isFixedDepartmentName(name)) {
@@ -1533,7 +1549,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-        const response = await fetch("/api/departments", {
+        const response = await fetchWithAuth("/api/departments", {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name }),
@@ -1542,12 +1558,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         if (!payload.ok) {
           return { ok: false as const, message: payload.message || "所属の削除に失敗しました。" };
         }
-        await refreshStaffFromSupabase();
-        const remote = await fetchShiftSnapshotFromApi();
-        if (remote) {
-          lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remote);
-          setState((prev) => ({ ...prev, ...remote }));
-        }
+        await refreshStaffAndShiftFromSupabase();
         return { ok: true as const };
       } catch (error) {
         return {
@@ -1555,7 +1566,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           message: error instanceof Error ? error.message : "所属の削除に失敗しました。",
         };
       }
-  }, [refreshStaffFromSupabase]);
+  }, [refreshStaffAndShiftFromSupabase]);
 
   const createStaff = useCallback(async (input: StaffEditableFields) => {
     const emailParsed = parseLoginEmail(input.email ?? "");
@@ -1582,7 +1593,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-        const response = await fetch("/api/staff", {
+        const response = await fetchWithAuth("/api/staff", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "same-origin",
@@ -1641,29 +1652,24 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-        const response = await fetch("/api/staff", {
+        const response = await fetchWithAuth("/api/staff", {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id: staffId }),
         });
-        const payload = (await response.json()) as { ok: boolean; message?: string };
+        const payload = (await response.json()) as { ok: boolean; message?: string; deleted?: boolean };
         if (!payload.ok) {
           return { ok: false as const, message: payload.message || "スタッフの削除に失敗しました。" };
         }
-        await refreshStaffFromSupabase();
-        const remote = await fetchShiftSnapshotFromApi();
-        if (remote) {
-          lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(remote);
-          setState((prev) => ({ ...prev, ...remote }));
-        }
-        return { ok: true as const };
+        await refreshStaffAndShiftFromSupabase();
+        return { ok: true as const, deleted: Boolean(payload.deleted) };
       } catch (error) {
         return {
           ok: false as const,
           message: error instanceof Error ? error.message : "スタッフの削除に失敗しました。",
         };
       }
-  }, [currentUser, refreshStaffFromSupabase]);
+  }, [currentUser, refreshStaffAndShiftFromSupabase]);
 
   const upsertDesiredShift = useCallback(
     (input: WishInput) => {
@@ -2217,7 +2223,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       }
 
       try {
-        const response = await fetch("/api/messages", {
+        const response = await fetchWithAuth("/api/messages", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(input),
@@ -2244,7 +2250,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       if (!canManageMaster) return;
 
       try {
-        const response = await fetch("/api/messages", {
+        const response = await fetchWithAuth("/api/messages", {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id: messageId }),

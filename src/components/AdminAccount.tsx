@@ -1,12 +1,24 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useShift } from "@/components/context/ShiftContext";
+import { createClient } from "@/lib/supabase/client";
 
 export function AdminAccount() {
-  const { updateStaff, changeStaffPassword, currentUser } = useShift();
+  const { updateStaff, saveStaffProfile, changeStaffPassword, refreshStaffFromSupabase, currentUser } = useShift();
+  const [emailDraft, setEmailDraft] = useState("");
   const [passwordDraft, setPasswordDraft] = useState("");
+
+  useEffect(() => {
+    if (currentUser?.role === "admin") {
+      setEmailDraft(currentUser.email);
+    }
+  }, [currentUser?.email, currentUser?.role]);
+
+  useEffect(() => {
+    void refreshStaffFromSupabase();
+  }, [refreshStaffFromSupabase]);
 
   if (!currentUser || currentUser.role !== "admin") {
     return (
@@ -21,6 +33,46 @@ export function AdminAccount() {
 
   const admin = currentUser;
 
+  const signOutAndGoToLogin = async () => {
+    try {
+      const supabase = createClient();
+      await supabase.auth.signOut();
+    } catch {
+      // ローカル環境で Supabase が未設定でも続行する
+    }
+    window.location.assign("/login");
+  };
+
+  const handleSaveEmail = async () => {
+    const nextEmail = emailDraft.trim();
+    if (!nextEmail) {
+      window.alert("メールアドレスを入力してください。");
+      return;
+    }
+    if (nextEmail === admin.email.trim()) {
+      window.alert("変更後のメールアドレスが同じです。");
+      return;
+    }
+    const result = await saveStaffProfile(admin.id, { email: nextEmail });
+    if (!result.ok) {
+      window.alert(result.message);
+      return;
+    }
+    window.alert("メールアドレスを更新しました。再ログインしてください。");
+    await signOutAndGoToLogin();
+  };
+
+  const handleChangePassword = async () => {
+    const result = await changeStaffPassword(admin.id, passwordDraft);
+    if (!result.ok) {
+      window.alert(result.message);
+      return;
+    }
+    setPasswordDraft("");
+    window.alert("パスワードを更新しました。再ログインしてください。");
+    await signOutAndGoToLogin();
+  };
+
   return (
     <div className="stack">
       <section className="panel stack">
@@ -29,9 +81,14 @@ export function AdminAccount() {
             <h1 style={{ margin: 0 }}>管理アカウント</h1>
             <div className="muted">管理者自身のアカウント設定です。スタッフマスタとは分けています。</div>
           </div>
-          <Link href="/" className="btn">
-            ホームへ
-          </Link>
+          <div className="actions" style={{ marginTop: 0 }}>
+            <button type="button" className="btn" onClick={() => void refreshStaffFromSupabase()}>
+              最新に更新
+            </button>
+            <Link href="/" className="btn">
+              ホームへ
+            </Link>
+          </div>
         </div>
       </section>
 
@@ -39,7 +96,10 @@ export function AdminAccount() {
         <div className="form-grid master-form-grid">
           <label>
             メール（ログインID）
-            <input value={admin.email} readOnly />
+            <input value={emailDraft} onChange={(e) => setEmailDraft(e.target.value)} />
+            <button type="button" className="btn ghost-sm" onClick={() => void handleSaveEmail()}>
+              変更
+            </button>
           </label>
           <label>
             名前
@@ -58,17 +118,7 @@ export function AdminAccount() {
               <button
                 type="button"
                 className="btn ghost-sm"
-                onClick={() => {
-                  void (async () => {
-                    const result = await changeStaffPassword(admin.id, passwordDraft);
-                    if (!result.ok) {
-                      window.alert(result.message);
-                      return;
-                    }
-                    setPasswordDraft("");
-                    window.alert("パスワードを更新しました。");
-                  })();
-                }}
+                onClick={() => void handleChangePassword()}
               >
                 変更
               </button>

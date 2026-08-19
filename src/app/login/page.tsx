@@ -7,9 +7,6 @@ export default function LoginPage() {
       <section className="panel login-card stack">
         <div>
           <h1 style={{ margin: 0, fontSize: 22 }}>シフト調整アプリ</h1>
-          <p className="muted" style={{ margin: "8px 0 0" }}>
-            Supabase アカウントでログインしてください。
-          </p>
         </div>
         <Suspense fallback={<p className="muted">読み込み中...</p>}>
           <LoginForm />

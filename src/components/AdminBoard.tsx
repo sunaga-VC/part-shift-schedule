@@ -41,7 +41,7 @@ import {
   getAdminShiftStatus,
   hasStaffPendingAdjustment,
   isAdminResubmissionPending,
-  isDepartmentCalendarDatePublished,
+  computeDepartmentPublishedDates,
   resolveAdminShiftDisplay,
 } from "@/lib/shift/publish-state";
 import { buildWeeklyStaffSummary } from "@/lib/shift/summary";
@@ -505,6 +505,15 @@ export function AdminBoard() {
   }, [selectedWorkerId, state.staffList]);
 
   const activeWorkers = state.staffList.filter((s) => s.role === "worker" && s.status === "active");
+  const staffById = useMemo(() => new Map(state.staffList.map((staff) => [staff.id, staff] as const)), [state.staffList]);
+  const desiredShiftByDateStaff = useMemo(
+    () => new Map(state.desiredShifts.map((shift) => [`${shift.date}:${shift.staffId}`, shift] as const)),
+    [state.desiredShifts]
+  );
+  const confirmedShiftByDateStaff = useMemo(
+    () => new Map(state.confirmedShifts.map((shift) => [`${shift.date}:${shift.staffId}`, shift] as const)),
+    [state.confirmedShifts]
+  );
   const shiftsForGanttDate = useMemo(() => {
     const desired = new Map<string, DesiredShift>();
     const confirmed = new Map<string, ConfirmedShift>();
@@ -645,6 +654,35 @@ export function AdminBoard() {
     () => listOperableDepartmentNames(state.departments),
     [state.departments]
   );
+  const knownDepartments = useMemo(() => new Set(getGoalDisplayDepartments(masterDepartments)), [masterDepartments]);
+  const departmentPublishedDatesByKey = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const department of getGoalDisplayDepartments(masterDepartments)) {
+      map.set(
+        department,
+        new Set(
+          computeDepartmentPublishedDates(
+            state.period,
+            state.staffList,
+            state.confirmedShifts,
+            department,
+            { knownDepartments }
+          )
+        )
+      );
+    }
+    if (state.staffList.some((staff) => staff.role === "worker" && staff.status === "active" && !knownDepartments.has(staff.team))) {
+      map.set(
+        "未設定",
+        new Set(
+          computeDepartmentPublishedDates(state.period, state.staffList, state.confirmedShifts, "未設定", {
+            knownDepartments,
+          })
+        )
+      );
+    }
+    return map;
+  }, [knownDepartments, state.confirmedShifts, state.period, state.staffList, masterDepartments]);
 
   const operableDepartments = useMemo(
     () => getManagedDepartmentsForAdmin(currentUser, masterDepartments),
@@ -671,7 +709,6 @@ export function AdminBoard() {
     }
 
     const departmentNames = getGoalDisplayDepartments(masterDepartments);
-    const knownDepartments = new Set(departmentNames);
     const publishedByDateDept = new Map<string, boolean>();
     const days = new Map<string, CalendarDayData>();
 
@@ -712,27 +749,13 @@ export function AdminBoard() {
       for (const department of departmentNames) {
         publishedByDateDept.set(
           `${date}:${department}`,
-          isDepartmentCalendarDatePublished(
-            date,
-            department,
-            state.period,
-            state.staffList,
-            state.confirmedShifts,
-            { knownDepartments }
-          )
+          departmentPublishedDatesByKey.get(department)?.has(date) ?? false
         );
       }
       if (dayRoster.some(({ staff }) => !knownDepartments.has(staff.team))) {
         publishedByDateDept.set(
           `${date}:未設定`,
-          isDepartmentCalendarDatePublished(
-            date,
-            "未設定",
-            state.period,
-            state.staffList,
-            state.confirmedShifts,
-            { knownDepartments }
-          )
+          departmentPublishedDatesByKey.get("未設定")?.has(date) ?? false
         );
       }
 
@@ -747,6 +770,7 @@ export function AdminBoard() {
   }, [
     activeWorkers,
     calendarDates,
+    departmentPublishedDatesByKey,
     masterDepartments,
     state.confirmedShifts,
     state.desiredShifts,
@@ -809,17 +833,13 @@ export function AdminBoard() {
     () =>
       masterDepartments.map((department) => {
         const summaries = selectedWeekSummaries.filter(
-          (summary) => state.staffList.find((staff) => staff.id === summary.staffId)?.team === department
+          (summary) => staffById.get(summary.staffId)?.team === department
         );
         const issues = selectedWeekDates.flatMap((date) =>
           activeWorkers.flatMap((staff) => {
             if (staff.team !== department) return [];
-            const desiredShift = state.desiredShifts.find(
-              (shift) => shift.date === date && shift.staffId === staff.id
-            );
-            const confirmedShift = state.confirmedShifts.find(
-              (shift) => shift.date === date && shift.staffId === staff.id
-            );
+            const desiredShift = desiredShiftByDateStaff.get(`${date}:${staff.id}`);
+            const confirmedShift = confirmedShiftByDateStaff.get(`${date}:${staff.id}`);
             const currentStatus = resolveShiftStatus(confirmedShift, desiredShift, date);
             return currentStatus === "adjusting"
               ? [{ date, name: getStaffDisplayName(staff) }]
@@ -828,7 +848,15 @@ export function AdminBoard() {
         );
         return { department, issues, summaries };
       }),
-    [activeWorkers, masterDepartments, selectedWeekDates, selectedWeekSummaries, state.confirmedShifts, state.desiredShifts, state.staffList]
+    [
+      activeWorkers,
+      confirmedShiftByDateStaff,
+      desiredShiftByDateStaff,
+      masterDepartments,
+      selectedWeekDates,
+      selectedWeekSummaries,
+      staffById,
+    ]
   );
   async function handlePublishDepartment(department: string) {
     if (!selectedWeekDates[0]) return;
@@ -890,14 +918,10 @@ export function AdminBoard() {
               <span>確定</span>
             </div>
             {summaries.map((summary) => {
-              const staff = state.staffList.find((s) => s.id === summary.staffId);
+              const staff = staffById.get(summary.staffId);
               const weekCells = selectedWeekDates.map((date) => {
-                const confirmedShift = state.confirmedShifts.find(
-                  (shift) => shift.staffId === summary.staffId && shift.date === date
-                );
-                const desiredShift = state.desiredShifts.find(
-                  (shift) => shift.staffId === summary.staffId && shift.date === date
-                );
+                const confirmedShift = confirmedShiftByDateStaff.get(`${date}:${summary.staffId}`);
+                const desiredShift = desiredShiftByDateStaff.get(`${date}:${summary.staffId}`);
                 const currentStatus = resolveShiftStatus(confirmedShift, desiredShift, date);
                 const cellShift = resolveAdminShiftDisplay(confirmedShift, desiredShift, { currentStatus });
                 if (!cellShift || currentStatus === "unconfirmed") {
@@ -1333,7 +1357,7 @@ export function AdminBoard() {
 
   if (viewMode === "workers") {
     const selectedSummary = weeklySummaries.find((summary) => summary.staffId === selectedWorkerId);
-    const selectedStaff = state.staffList.find((staff) => staff.id === selectedWorkerId);
+    const selectedStaff = staffById.get(selectedWorkerId);
     return (
       <div className="admin-board-page">
       <div className="stack">

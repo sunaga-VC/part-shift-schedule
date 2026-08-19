@@ -17,3 +17,20 @@ export function createClient() {
   }
   return createBrowserClient<Database>(url, key);
 }
+
+/** Cookie が欠ける場合でも API にセッションを渡す */
+export async function fetchWithAuth(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const supabase = createClient();
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  const headers = new Headers(init?.headers);
+  if (session?.access_token && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${session.access_token}`);
+  }
+  return fetch(input, {
+    ...init,
+    headers,
+    credentials: init?.credentials ?? "same-origin",
+  });
+}

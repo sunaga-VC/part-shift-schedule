@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import canonicalAccountData from "../src/lib/supabase/canonicalAuthAccounts.json" with { type: "json" };
 
 function loadEnv() {
   const path = resolve(process.cwd(), ".env.local");
@@ -27,6 +28,9 @@ loadEnv();
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+const accountByEmail = Object.fromEntries(
+  canonicalAccountData.accounts.map((account) => [account.loginEmail.toLowerCase(), account])
+);
 
 if (!url || !serviceKey || !anonKey) {
   console.error("Missing env vars");
@@ -34,9 +38,9 @@ if (!url || !serviceKey || !anonKey) {
 }
 
 const TARGETS = [
-  { label: "許", email: "j_kyo@vegecoop.co.jp", altEmails: ["help@vegecoop.co.jp", "j_ky@vegecoop.co.jp"], password: "general1" },
-  { label: "須永", email: "recruiting@example.co.jp", altEmails: ["vegeintern01@vegecoop.co.jp"], password: "admin01" },
-];
+  { label: "一般管理者", account: accountByEmail["j_kyo@vegecoop.co.jp"] },
+  { label: "管理者", account: accountByEmail["recruiting@example.co.jp"] },
+].filter((target) => Boolean(target.account));
 
 const service = createClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
 const anon = createClient(url, anonKey, { auth: { autoRefreshToken: false, persistSession: false } });
@@ -55,17 +59,19 @@ async function listAllAuthUsers() {
 }
 
 async function diagnoseTarget(target) {
-  console.log(`\n======== ${target.label} (${target.email}) ========`);
+  console.log(`\n======== ${target.label} (${target.account.loginEmail}) ========`);
 
   const { data: profileByEmail, error: profileErr } = await service
     .from("staff_profiles")
     .select("id, email, last_name, first_name, role, admin_permission, status")
-    .eq("email", target.email)
+    .in("email", target.account.matchEmails)
     .maybeSingle();
   if (profileErr) console.log("profile error:", profileErr.message);
   console.log("profile by login email:", profileByEmail ?? "NOT FOUND");
 
-  for (const alt of target.altEmails) {
+  for (const alt of target.account.matchEmails.filter(
+    (email) => email.toLowerCase() !== target.account.loginEmail.toLowerCase()
+  )) {
     const { data: altProfile } = await service
       .from("staff_profiles")
       .select("id, email, last_name, role, status")
@@ -75,13 +81,18 @@ async function diagnoseTarget(target) {
   }
 
   const authUsers = await listAllAuthUsers();
-  const authByLogin = authUsers.find((u) => u.email?.trim().toLowerCase() === target.email.toLowerCase());
-  console.log("auth by login email:", authByLogin ? { id: authByLogin.id, email: authByLogin.email, confirmed: authByLogin.email_confirmed_at } : "NOT FOUND");
+  const authByLogin = authUsers.find((u) =>
+    target.account.matchEmails.some((alias) => u.email?.trim().toLowerCase() === alias.toLowerCase())
+  );
+  console.log(
+    "auth by login email:",
+    authByLogin ? { id: authByLogin.id, email: authByLogin.email, confirmed: authByLogin.email_confirmed_at } : "NOT FOUND"
+  );
 
   if (profileByEmail) {
     const authById = authUsers.find((u) => u.id === profileByEmail.id);
     console.log("auth by profile id:", authById ? { id: authById.id, email: authById.email } : "NOT FOUND");
-    if (authById && authById.email?.toLowerCase() !== target.email.toLowerCase()) {
+    if (authById && authById.email?.toLowerCase() !== target.account.loginEmail.toLowerCase()) {
       console.log("!! MISMATCH: auth email != profile email");
     }
     if (authById && authById.id !== profileByEmail.id) {
@@ -91,13 +102,16 @@ async function diagnoseTarget(target) {
 
   // Try login with canonical password
   const { data: signInData, error: signInError } = await anon.auth.signInWithPassword({
-    email: target.email,
-    password: target.password,
+    email: target.account.loginEmail,
+    password: target.account.password,
   });
   if (signInError) {
-    console.log(`login test (${target.password}): FAILED -`, signInError.message);
+    console.log(`login test (${target.account.password}): FAILED -`, signInError.message);
   } else {
-    console.log(`login test (${target.password}): OK`, { authId: signInData.user?.id, authEmail: signInData.user?.email });
+    console.log(`login test (${target.account.password}): OK`, {
+      authId: signInData.user?.id,
+      authEmail: signInData.user?.email,
+    });
     if (profileByEmail && signInData.user?.id !== profileByEmail.id) {
       console.log("!! login auth id != profile id");
     }
@@ -107,12 +121,14 @@ async function diagnoseTarget(target) {
   // Reset password to known value if login failed
   if (signInError && profileByEmail) {
     const authId = authUsers.find((u) => u.id === profileByEmail.id)?.id
-      ?? authUsers.find((u) => u.email?.trim().toLowerCase() === target.email.toLowerCase())?.id;
+      ?? authUsers.find((u) =>
+        target.account.matchEmails.some((alias) => u.email?.trim().toLowerCase() === alias.toLowerCase())
+      )?.id;
     if (authId) {
       console.log(`Attempting password reset for auth id ${authId}...`);
       const { error: resetErr } = await service.auth.admin.updateUserById(authId, {
-        password: target.password,
-        email: target.email,
+        password: target.account.password,
+        email: target.account.loginEmail,
         email_confirm: true,
       });
       if (resetErr) {
@@ -120,8 +136,8 @@ async function diagnoseTarget(target) {
       } else {
         console.log("password reset OK, retrying login...");
         const { error: retryErr } = await anon.auth.signInWithPassword({
-          email: target.email,
-          password: target.password,
+          email: target.account.loginEmail,
+          password: target.account.password,
         });
         console.log(retryErr ? `retry login FAILED: ${retryErr.message}` : "retry login OK");
         await anon.auth.signOut();

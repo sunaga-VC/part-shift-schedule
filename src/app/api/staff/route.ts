@@ -564,7 +564,7 @@ type DeleteStaffBody = {
   id?: string;
 };
 
-/** スタッフ削除（退職フォールバック含む） */
+/** スタッフ削除（DB から物理削除） */
 export async function DELETE(request: Request) {
   const auth = await requireManagerService();
   if (!auth.ok) return auth.response;
@@ -600,6 +600,6 @@ export async function DELETE(request: Request) {
     return NextResponse.json({ ok: false, message: result.message }, { status: 400 });
   }
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, deleted: result.deleted });
 }
 

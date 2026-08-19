@@ -41,6 +41,10 @@ export function AdminHomeMessages() {
     () => listOperableDepartmentNames(state.departments),
     [state.departments]
   );
+  const staffById = useMemo(
+    () => new Map(state.staffList.map((staff) => [staff.id, staff] as const)),
+    [state.staffList]
+  );
 
   const messages = state.homeMessages ?? [];
 
@@ -145,7 +149,7 @@ export function AdminHomeMessages() {
               <div className="muted">メッセージがありません</div>
             ) : (
               messages.map((message) => {
-                const author = state.staffList.find((s) => s.id === message.createdByStaffId);
+                const author = staffById.get(message.createdByStaffId);
                 return (
                   <article key={message.id} className="list-item home-message-item">
                     <div className="home-message-item-main">
@@ -176,7 +180,7 @@ export function AdminHomeMessages() {
             <div className="muted">メッセージがありません</div>
           ) : (
             messages.map((message) => {
-              const author = state.staffList.find((s) => s.id === message.createdByStaffId);
+              const author = staffById.get(message.createdByStaffId);
               return (
                 <article key={message.id} className="list-item home-message-item">
                   <div className="home-message-item-main">
@@ -199,6 +203,10 @@ export function AdminHomeMessages() {
 
 export function WorkerHomeMessages() {
   const { state, currentUser } = useShift();
+  const staffById = useMemo(
+    () => new Map(state.staffList.map((staff) => [staff.id, staff] as const)),
+    [state.staffList]
+  );
 
   const messages = useMemo(() => {
     if (!currentUser) return [];
@@ -214,7 +222,7 @@ export function WorkerHomeMessages() {
       </div>
       <div className="home-message-list">
         {messages.map((message) => {
-          const author = state.staffList.find((s) => s.id === message.createdByStaffId);
+          const author = staffById.get(message.createdByStaffId);
           return (
             <article key={message.id} className="list-item home-message-item">
               <div className="home-message-item-main">

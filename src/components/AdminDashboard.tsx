@@ -158,15 +158,19 @@ export function AdminDashboard() {
     () => buildWeeklyStaffSummary(filteredWorkers, filteredDesired, filteredConfirmed),
     [filteredConfirmed, filteredDesired, filteredWorkers]
   );
+  const periodStaffSummaryById = useMemo(
+    () => new Map(periodStaffSummary.map((summary) => [summary.staffId, summary] as const)),
+    [periodStaffSummary]
+  );
 
   const staffRows = useMemo(() => {
     return filteredWorkers
       .map((staff) => {
-        const weekly = periodStaffSummary.find((w) => w.staffId === staff.id);
+        const weekly = periodStaffSummaryById.get(staff.id);
         return { staff, weekly };
       })
       .sort((a, b) => a.staff.name.localeCompare(b.staff.name, "ja"));
-  }, [filteredWorkers, periodStaffSummary]);
+  }, [filteredWorkers, periodStaffSummaryById]);
 
   const staffSummaryMeta = useMemo(() => {
     const noWish = staffRows.filter(({ weekly }) => !weekly?.hasDesiredShift).length;

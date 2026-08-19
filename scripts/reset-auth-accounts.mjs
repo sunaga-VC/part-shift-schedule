@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import canonicalAccountData from "../src/lib/supabase/canonicalAuthAccounts.json" with { type: "json" };
 
 function loadEnv() {
   const path = resolve(process.cwd(), ".env.local");
@@ -31,62 +32,7 @@ if (!url || !key) {
   process.exit(1);
 }
 
-/** @type {const} */
-const ACCOUNTS = [
-  {
-    loginEmail: "recruiting@example.co.jp",
-    password: "admin01",
-    matchEmails: ["recruiting@example.co.jp"],
-    lastName: "管理者",
-    role: "admin",
-    adminPermission: "manager",
-    departmentName: "リクルーティング",
-    managedDepartments: ["リクルーティング", "第1チーム", "第2チーム", "第3チーム"],
-  },
-  {
-    loginEmail: "j_kyo@vegecoop.co.jp",
-    password: "general1",
-    matchEmails: ["j_kyo@vegecoop.co.jp", "help@vegecoop.co.jp", "j_ky@vegecoop.co.jp"],
-    lastName: "一般管理者",
-    role: "admin",
-    adminPermission: "general",
-    departmentName: "第1チーム",
-    managedDepartments: ["第1チーム"],
-  },
-  {
-    loginEmail: "sales1@example.com",
-    password: "pass001",
-    matchEmails: ["shibata@vegecoop.co.jp", "sales1@example.com"],
-    lastName: "田中",
-    firstName: "太郎",
-    role: "worker",
-    adminPermission: "general",
-    departmentName: "第1チーム",
-    managedDepartments: [],
-  },
-  {
-    loginEmail: "partsaiyo@vegecoop.co.jp",
-    password: "part001",
-    matchEmails: ["partsaiyo@vegecoop.co.jp"],
-    lastName: "アルバイト管理者",
-    role: "admin",
-    adminPermission: "part_time_admin",
-    departmentName: "第2チーム",
-    managedDepartments: ["第2チーム", "第3チーム"],
-    findByAdminPermission: "part_time_admin",
-  },
-  {
-    loginEmail: "sunaga@vegecoop.co.jp",
-    password: "pass002",
-    matchEmails: ["sunaga@vegegoop.co.jp", "sunaga@vegecoop.co.jp"],
-    lastName: "佐藤",
-    firstName: "花子",
-    role: "worker",
-    adminPermission: "general",
-    departmentName: "第2チーム",
-    managedDepartments: [],
-  },
-];
+const ACCOUNTS = canonicalAccountData.accounts;
 
 const service = createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
 const anon = createClient(url, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? key, {

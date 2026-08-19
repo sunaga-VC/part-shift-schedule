@@ -10,7 +10,7 @@ import { formatDateLong, formatDateShort } from "@/lib/shift/dates";
 import { getStaffDisplayName } from "@/lib/shift/display";
 import {
   hasStaffPendingAdjustment,
-  isWorkerCalendarDatePublished,
+  computeWorkerPublishedDates,
   resolveWorkerShiftDisplay,
 } from "@/lib/shift/publish-state";
 import {
@@ -122,6 +122,32 @@ export function WishCalendarPage() {
     if (!isWorkerView) return workerPublishedDates ?? [];
     return Array.from(new Set([...(workerPublishedDates ?? []), ...stickyPublishedDates])).sort();
   }, [isWorkerView, workerPublishedDates, stickyPublishedDates]);
+  const workerPublishedDateSet = useMemo(() => new Set(effectiveWorkerPublishedDates), [effectiveWorkerPublishedDates]);
+  const fallbackPublishedDates = useMemo(
+    () =>
+      isWorkerView
+        ? workerPublishedDateSet
+        : new Set(
+            computeWorkerPublishedDates(
+              state.period,
+              state.staffList,
+              state.confirmedShifts,
+              currentUser?.id ?? "",
+              currentUser?.team ?? "",
+              { knownDepartments }
+            )
+          ),
+    [
+      currentUser?.id,
+      currentUser?.team,
+      isWorkerView,
+      knownDepartments,
+      state.confirmedShifts,
+      state.period,
+      state.staffList,
+      workerPublishedDateSet,
+    ]
+  );
 
   const calendarDates = useMemo(() => weekGroups.flat(), [weekGroups]);
   const workerCalendarCells = useMemo(() => {
@@ -148,28 +174,7 @@ export function WishCalendarPage() {
     for (const date of calendarDates) {
       const mine = currentUserId ? myWishByDate.get(date) : undefined;
       const confirmedShift = currentUserId ? myConfirmedByDate.get(date) : undefined;
-      const isPublishedDate = isWorkerView
-        ? effectiveWorkerPublishedDates.includes(date) ||
-          isWorkerCalendarDatePublished(
-            date,
-            workerPublishedDates,
-            state.period,
-            state.staffList,
-            state.confirmedShifts,
-            currentUser?.team ?? "",
-            currentUserId ?? "",
-            { knownDepartments }
-          )
-        : isWorkerCalendarDatePublished(
-            date,
-            workerPublishedDates,
-            state.period,
-            state.staffList,
-            state.confirmedShifts,
-            currentUser?.team ?? "",
-            currentUserId ?? "",
-            { knownDepartments }
-          );
+      const isPublishedDate = fallbackPublishedDates.has(date);
       const isPendingAdjustment =
         !isWorkerView &&
         hasStaffPendingAdjustment(

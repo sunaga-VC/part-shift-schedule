@@ -48,7 +48,7 @@ const STAFF = [
 ];
 
 const service = createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
-const anon = createClient(url, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? key, {
+const anon = createClient(url, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false },
 });
 
