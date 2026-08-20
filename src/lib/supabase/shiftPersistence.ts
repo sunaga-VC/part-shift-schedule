@@ -756,40 +756,46 @@ async function syncWorkerAdjustingConfirmedShifts(
   const ownConfirmed = snapshot.confirmedShifts.filter(
     (shift) => shift.staffId === staffId && Boolean(shift.publishedAt)
   );
+  if (ownConfirmed.length === 0) return;
 
-  for (const confirmed of ownConfirmed) {
+  const updates = ownConfirmed.flatMap((confirmed) => {
     const desired = ownDesired.find((shift) => shift.date === confirmed.date);
     const wishChanged = hasWishChangedAfterPublish(confirmed, desired);
-
     if (wishChanged) {
-      const { error } = await supabase
-        .from("confirmed_shifts")
-        .update({
-          status: "adjusting",
-          updated_at: desired?.updatedAt ?? confirmed.updatedAt,
-        })
-        .eq("staff_id", staffId)
-        .eq("work_date", confirmed.date);
-      if (error) throw error;
-      continue;
+      return [
+        supabase
+          .from("confirmed_shifts")
+          .update({
+            status: "adjusting",
+            updated_at: desired?.updatedAt ?? confirmed.updatedAt,
+          })
+          .eq("staff_id", staffId)
+          .eq("work_date", confirmed.date),
+      ];
     }
-
     if (confirmed.status === "adjusting" && !wishChanged) {
       const nextStatus =
         !desired || !confirmed.publishedAt || isRestConfirmedShift(confirmed)
           ? "unconfirmed"
           : "confirmed";
-      const { error } = await supabase
-        .from("confirmed_shifts")
-        .update({
-          status: nextStatus,
-          updated_at: confirmed.publishedAt ?? confirmed.updatedAt,
-        })
-        .eq("staff_id", staffId)
-        .eq("work_date", confirmed.date);
-      if (error) throw error;
+      return [
+        supabase
+          .from("confirmed_shifts")
+          .update({
+            status: nextStatus,
+            updated_at: confirmed.publishedAt ?? confirmed.updatedAt,
+          })
+          .eq("staff_id", staffId)
+          .eq("work_date", confirmed.date),
+      ];
     }
-  }
+    return [];
+  });
+
+  if (updates.length === 0) return;
+  const results = await Promise.all(updates);
+  const error = results.find((result) => result.error)?.error;
+  if (error) throw error;
 }
 
 export async function persistWorkerDesiredShiftsToSupabase(
@@ -797,8 +803,10 @@ export async function persistWorkerDesiredShiftsToSupabase(
   snapshot: ShiftPersistenceSnapshot,
   staffId: string
 ): Promise<string> {
-  const { periodId } = await resolveCanonicalPeriod(supabase, snapshot);
-  const ownDesired = snapshot.desiredShifts.map((shift) => ({ ...shift, staffId }));
+  const periodId = snapshot.period.id
+    ? snapshot.period.id
+    : (await resolveCanonicalPeriod(supabase, snapshot)).periodId;
+  const ownDesired = snapshot.desiredShifts.map((shift) => ({ ...shift, staffId, periodId }));
   const desiredDates = new Set(ownDesired.map((shift) => shift.date));
 
   const { data: existingRows, error: existingError } = await supabase
@@ -810,36 +818,40 @@ export async function persistWorkerDesiredShiftsToSupabase(
   const deleteDates = (existingRows ?? [])
     .map((row) => row.work_date)
     .filter((date) => !desiredDates.has(date));
+
+  const writes: PromiseLike<{ error: { message: string } | null }>[] = [];
   if (deleteDates.length > 0) {
-    const { error: deleteRemovedError } = await supabase
-      .from("desired_shifts")
-      .delete()
-      .eq("staff_id", staffId)
-      .in("work_date", deleteDates);
-    if (deleteRemovedError) throw deleteRemovedError;
-
-    const { error: deleteDraftConfirmedError } = await supabase
-      .from("confirmed_shifts")
-      .delete()
-      .eq("staff_id", staffId)
-      .in("work_date", deleteDates)
-      .is("published_at", null);
-    if (deleteDraftConfirmedError) throw deleteDraftConfirmedError;
+    writes.push(
+      supabase.from("desired_shifts").delete().eq("staff_id", staffId).in("work_date", deleteDates)
+    );
+    writes.push(
+      supabase
+        .from("confirmed_shifts")
+        .delete()
+        .eq("staff_id", staffId)
+        .in("work_date", deleteDates)
+        .is("published_at", null)
+    );
   }
-
   if (ownDesired.length > 0) {
     const desiredRows = ownDesired.map((shift) => ({
-      ...serializeDesiredShift({ ...shift, staffId, periodId }),
+      ...serializeDesiredShift(shift),
       staff_id: staffId,
       period_id: periodId,
     }));
-    const { error: upsertError } = await supabase
-      .from("desired_shifts")
-      .upsert(desiredRows, { onConflict: "staff_id,work_date" });
-    if (upsertError) throw upsertError;
+    writes.push(supabase.from("desired_shifts").upsert(desiredRows, { onConflict: "staff_id,work_date" }));
+  }
+  if (writes.length > 0) {
+    const results = await Promise.all(writes);
+    const error = results.find((result) => result.error)?.error;
+    if (error) throw error;
   }
 
-  await syncWorkerAdjustingConfirmedShifts(supabase, snapshot, staffId);
+  await syncWorkerAdjustingConfirmedShifts(
+    supabase,
+    { ...snapshot, desiredShifts: ownDesired },
+    staffId
+  );
   return periodId;
 }
 

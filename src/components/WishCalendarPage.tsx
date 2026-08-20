@@ -475,13 +475,11 @@ export function WishCalendarPage() {
       setMessage(result.message);
       return;
     }
-    const persisted = await flushShiftPersist();
-    if (!persisted.ok) {
-      setMessage(`保存に失敗しました: ${persisted.message}`);
-      return;
-    }
     setEditing(false);
     setMessage("保存しました。管理者画面に反映されます。");
+    void flushShiftPersist().then((persisted) => {
+      if (!persisted.ok) setMessage(`保存に失敗しました: ${persisted.message}`);
+    });
   }
 
   async function handleDelete() {
@@ -490,13 +488,11 @@ export function WishCalendarPage() {
       setMessage(result.message);
       return;
     }
-    const persisted = await flushShiftPersist();
-    if (!persisted.ok) {
-      setMessage(`削除に失敗しました: ${persisted.message}`);
-      return;
-    }
     setEditing(false);
     setMessage("削除しました。");
+    void flushShiftPersist().then((persisted) => {
+      if (!persisted.ok) setMessage(`削除に失敗しました: ${persisted.message}`);
+    });
   }
 
   const handleGoToday = () => {

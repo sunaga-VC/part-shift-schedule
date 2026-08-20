@@ -329,15 +329,12 @@ function mergeWorkerPublishedDates(
   return Array.from(new Set([...prev, ...next])).sort();
 }
 
-function remoteMissingOwnDesiredDates(
-  local: ShiftPersistenceSnapshot,
-  remote: ShiftPersistenceSnapshot,
-  staffId: string
-): boolean {
-  const remoteDates = new Set(
-    remote.desiredShifts.filter((shift) => shift.staffId === staffId).map((shift) => shift.date)
-  );
-  return local.desiredShifts.some((shift) => shift.staffId === staffId && !remoteDates.has(shift.date));
+function ownDesiredDateKey(shifts: readonly DesiredShift[], staffId: string): string {
+  return shifts
+    .filter((shift) => shift.staffId === staffId)
+    .map((shift) => shift.date)
+    .sort()
+    .join("|");
 }
 
 function mergeFetchedShiftSnapshot(
@@ -349,17 +346,32 @@ function mergeFetchedShiftSnapshot(
   const mergedPublishedDates = isWorker
     ? mergeWorkerPublishedDates(prev.workerPublishedDates, remote.workerPublishedDates)
     : remote.workerPublishedDates;
-  const applied: ShiftPersistenceSnapshot = {
+  let applied: ShiftPersistenceSnapshot = {
     ...remote,
     workerPublishedDates: mergedPublishedDates,
   };
-  if (isWorker && remoteMissingOwnDesiredDates(localSnapshot, applied, prev.currentUserId)) {
-    const prevDates = prev.workerPublishedDates ?? [];
-    const nextDates = mergedPublishedDates ?? [];
-    if (prevDates.length === nextDates.length && prevDates.every((date, index) => date === nextDates[index])) {
-      return null;
-    }
-    return { ...prev, workerPublishedDates: mergedPublishedDates };
+  if (isWorker) {
+    const staffId = prev.currentUserId;
+    const localOwnDesired = localSnapshot.desiredShifts.filter((shift) => shift.staffId === staffId);
+    const remoteOwnDesired = applied.desiredShifts.filter((shift) => shift.staffId === staffId);
+    const keepLocalOwnDesired =
+      ownDesiredDateKey(localOwnDesired, staffId) !== ownDesiredDateKey(remoteOwnDesired, staffId);
+    const ownDesired = keepLocalOwnDesired ? localOwnDesired : remoteOwnDesired;
+    const otherDesired = applied.desiredShifts.filter((shift) => shift.staffId !== staffId);
+    const localUnpublishedDates = new Set(
+      localSnapshot.confirmedShifts
+        .filter((shift) => shift.staffId === staffId && !shift.publishedAt)
+        .map((shift) => shift.date)
+    );
+    applied = {
+      ...applied,
+      desiredShifts: [...otherDesired, ...ownDesired],
+      confirmedShifts: applied.confirmedShifts.filter((shift) => {
+        if (shift.staffId !== staffId) return true;
+        if (shift.publishedAt) return true;
+        return localUnpublishedDates.has(shift.date);
+      }),
+    };
   }
   const appliedSignature = buildShiftPersistenceSignature(applied);
   const localSignature = buildShiftPersistenceSignature(localSnapshot);
@@ -712,7 +724,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       if (lastShiftPersistSignatureRef.current === signature) return;
 
       shiftPersistInFlightRef.current += 1;
-      skipRemoteReloadUntilRef.current = Date.now() + (user.role === "worker" ? 1200 : 8000);
+      skipRemoteReloadUntilRef.current = Date.now() + (user.role === "worker" ? 2500 : 8000);
       try {
         const result = await persistSnapshotViaApi(user, snapshot);
         if (!result.ok) {
@@ -1022,24 +1034,21 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       shiftPersistDebounceRef.current = null;
     }
 
-    const startedAt = Date.now();
-    while (shiftPersistInFlightRef.current > 0) {
-      if (Date.now() - startedAt > 12000) {
-        return { ok: false, message: "保存が混み合っています。もう一度お試しください。" };
-      }
-      await new Promise((resolve) => setTimeout(resolve, 40));
-    }
-
     const snapshot = latestShiftSnapshotRef.current;
     const signature = buildShiftPersistenceSignature(snapshot);
     if (lastShiftPersistSignatureRef.current === signature) return { ok: true };
+
+    if (shiftPersistInFlightRef.current > 0) {
+      shiftPersistQueuedRef.current = true;
+      return { ok: true };
+    }
 
     shiftPersistInFlightRef.current += 1;
     try {
       const result = await persistSnapshotViaApi(currentUser, snapshot);
       if (!result.ok) return result;
       lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(latestShiftSnapshotRef.current);
-      skipRemoteReloadUntilRef.current = Date.now() + (currentUser.role === "worker" ? 1500 : 8000);
+      skipRemoteReloadUntilRef.current = Date.now() + (currentUser.role === "worker" ? 2500 : 8000);
       return { ok: true };
     } finally {
       finishShiftPersist(currentUser);
@@ -1050,13 +1059,14 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     if (!ready || !currentUserForSync || !shiftRemoteHydratedRef.current) return;
     if (shiftDragActiveRef.current) return;
 
+    if (currentUserForSync.role === "worker") return;
     if (lastShiftPersistSignatureRef.current === shiftPersistSignature) return;
 
     if (shiftPersistDebounceRef.current) {
       clearTimeout(shiftPersistDebounceRef.current);
     }
 
-    const debounceMs = currentUserForSync.role === "worker" ? 400 : 900;
+    const debounceMs = 900;
     shiftPersistDebounceRef.current = setTimeout(() => {
       shiftPersistDebounceRef.current = null;
       if (shiftDragActiveRef.current) return;
@@ -1129,7 +1139,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     pollTimer = setInterval(() => {
       if (document.visibilityState !== "visible") return;
       scheduleReloadShiftSnapshot();
-    }, currentUserRoleForSync === "admin" ? 3000 : 2500);
+    }, currentUserRoleForSync === "admin" ? 3000 : 5000);
 
     void (async () => {
       try {
