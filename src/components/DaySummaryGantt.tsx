@@ -52,6 +52,7 @@ function buildEntriesForDate(
       return { staff, desiredShift, confirmedShift, currentStatus };
     })
     .filter((entry) => {
+      if (entry.currentStatus === "unconfirmed") return false;
       const displayShift = resolveAdminShiftDisplay(entry.confirmedShift, entry.desiredShift, {
         currentStatus: entry.currentStatus,
       });

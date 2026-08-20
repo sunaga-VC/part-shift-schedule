@@ -11,8 +11,11 @@ import { getStaffDisplayName } from "@/lib/shift/display";
 import {
   hasStaffPendingAdjustment,
   computeWorkerPublishedDates,
+  isRestConfirmedShift,
+  isRestSentinelTime,
   resolveWorkerShiftDisplay,
 } from "@/lib/shift/publish-state";
+import { isAttendanceStatus } from "@/lib/shift/status";
 import {
   clampTimeToOptions,
   formatTimeRange,
@@ -22,10 +25,63 @@ import type { ConfirmedShift, DesiredShift } from "@/lib/shift/types";
 
 type WishCalendarDayCellData = {
   wishCount: number;
+  countLabel: string;
   timeLabel: string;
   timeClassName: string;
   cellStatusClass: string;
+  isRemote: boolean;
+  wishTimeLabel: string | null;
 };
+
+function RemoteMark() {
+  return (
+    <span className="remote-mark" title="在宅" aria-label="在宅">
+      在
+    </span>
+  );
+}
+
+function isRemoteNote(note?: string | null) {
+  return (note ?? "").includes("在宅");
+}
+
+function isRemoteDisplay(
+  display: ReturnType<typeof resolveWorkerShiftDisplay>,
+  wish?: DesiredShift
+) {
+  if (display.kind === "confirmed") return display.shift.status === "remote";
+  if (display.kind === "wish") return isRemoteNote(display.shift.note);
+  return isRemoteNote(wish?.note);
+}
+
+/** 確定後も元の希望時間を日付リストに出す（確定と同じ時刻でも隠さない） */
+function struckWishLabel(wish: Pick<DesiredShift, "startTime" | "endTime"> | undefined) {
+  if (!wish) return null;
+  if (isRestSentinelTime(wish.startTime, wish.endTime)) return null;
+  return formatTimeRange(wish.startTime, wish.endTime);
+}
+
+function ShiftTimes({
+  timeLabel,
+  timeClassName,
+  wishTimeLabel,
+  remote,
+}: {
+  timeLabel: string;
+  timeClassName: string;
+  wishTimeLabel?: string | null;
+  remote?: boolean;
+}) {
+  return (
+    <span className="shift-time-stack">
+      <span className={`shift-time-main ${timeClassName}`}>
+        {timeLabel}
+        {remote ? <RemoteMark /> : null}
+      </span>
+      {wishTimeLabel ? <span className="wish-struck-time">{wishTimeLabel}</span> : null}
+    </span>
+  );
+}
 
 const WishCalendarDayCell = memo(function WishCalendarDayCell({
   date,
@@ -58,11 +114,16 @@ const WishCalendarDayCell = memo(function WishCalendarDayCell({
       >
         <div className="day-num">{formatDateShort(date)}</div>
         <span className="day-meta" style={{ marginTop: 0, whiteSpace: "nowrap" }}>
-          希望 {data.wishCount}人
+          {data.countLabel} {data.wishCount}人
         </span>
       </div>
       <div className="day-meta">
-        <span className={data.timeClassName}>{data.timeLabel}</span>
+        <ShiftTimes
+          timeLabel={data.timeLabel}
+          timeClassName={data.timeClassName}
+          wishTimeLabel={data.wishTimeLabel}
+          remote={data.isRemote}
+        />
       </div>
     </button>
   );
@@ -152,6 +213,7 @@ export function WishCalendarPage() {
   const calendarDates = useMemo(() => weekGroups.flat(), [weekGroups]);
   const workerCalendarCells = useMemo(() => {
     const wishCountByDate = new Map<string, number>();
+    const publishedCountByDate = new Map<string, number>();
     const myWishByDate = new Map<string, DesiredShift>();
     const myConfirmedByDate = new Map<string, ConfirmedShift>();
     const currentUserId = currentUser?.id;
@@ -162,11 +224,17 @@ export function WishCalendarPage() {
         myWishByDate.set(shift.date, shift);
       }
     }
-    if (currentUserId) {
-      for (const shift of state.confirmedShifts) {
-        if (shift.staffId === currentUserId) {
-          myConfirmedByDate.set(shift.date, shift);
-        }
+    for (const shift of state.confirmedShifts) {
+      if (currentUserId && shift.staffId === currentUserId) {
+        myConfirmedByDate.set(shift.date, shift);
+      }
+      if (
+        isWorkerView &&
+        shift.publishedAt &&
+        isAttendanceStatus(shift.status) &&
+        !isRestConfirmedShift(shift)
+      ) {
+        publishedCountByDate.set(shift.date, (publishedCountByDate.get(shift.date) ?? 0) + 1);
       }
     }
 
@@ -205,6 +273,11 @@ export function WishCalendarPage() {
         timeLabel = "設定なし";
         timeClassName = "wish-edited-time";
       }
+      const isRemote = isRemoteDisplay(display, mine);
+      const wishTimeLabel =
+        isPublishedDate && (display.kind === "confirmed" || display.kind === "rest")
+          ? struckWishLabel(mine)
+          : null;
       const cellStatusClass = isWorkerView
         ? isPublishedDate
           ? " published-date"
@@ -215,10 +288,15 @@ export function WishCalendarPage() {
             ? " published-date"
             : "";
       cells.set(date, {
-        wishCount: wishCountByDate.get(date) ?? 0,
+        wishCount: isWorkerView && isPublishedDate
+          ? publishedCountByDate.get(date) ?? 0
+          : wishCountByDate.get(date) ?? 0,
+        countLabel: isWorkerView && isPublishedDate ? "出勤" : "希望",
         timeLabel,
         timeClassName,
         cellStatusClass,
+        isRemote,
+        wishTimeLabel,
       });
     }
     return cells;
@@ -227,6 +305,7 @@ export function WishCalendarPage() {
     currentUser?.id,
     currentUser?.team,
     effectiveWorkerPublishedDates,
+    fallbackPublishedDates,
     isWorkerView,
     knownDepartments,
     state.confirmedShifts,
@@ -290,7 +369,7 @@ export function WishCalendarPage() {
         shift: s,
         staff: workers.find((w) => w.id === s.staffId) ?? state.staffList.find((w) => w.id === s.staffId && w.status === "active"),
       }))
-      .filter((x) => x.staff)
+      .filter((x): x is typeof x & { staff: NonNullable<typeof x.staff> } => Boolean(x.staff))
       .sort((a, b) => {
         if (a.shift.startTime !== b.shift.startTime) {
           return a.shift.startTime.localeCompare(b.shift.startTime);
@@ -298,6 +377,70 @@ export function WishCalendarPage() {
         return getStaffDisplayName(a.staff).localeCompare(getStaffDisplayName(b.staff), "ja");
       });
   }, [detailDate, state.desiredShifts, state.staffList, workers]);
+
+  const dayOthers = useMemo(() => {
+    const fromWishes = () =>
+      dayWishes
+        .filter(({ shift }) => shift.staffId !== currentUser?.id)
+        .map(({ shift, staff }) => ({
+          id: shift.id,
+          startTime: shift.startTime,
+          endTime: shift.endTime,
+          wishTimeLabel: null as string | null,
+          isRemote: isRemoteNote(shift.note),
+          staff,
+        }));
+
+    if (!isWorkerView) return fromWishes();
+
+    const published = fallbackPublishedDates.has(detailDate);
+    if (published) {
+      const wishByStaff = new Map(
+        state.desiredShifts
+          .filter((shift) => shift.date === detailDate)
+          .map((shift) => [shift.staffId, shift] as const)
+      );
+      return state.confirmedShifts
+        .filter(
+          (shift) =>
+            shift.date === detailDate &&
+            shift.staffId !== currentUser?.id &&
+            Boolean(shift.publishedAt) &&
+            isAttendanceStatus(shift.status) &&
+            !isRestConfirmedShift(shift)
+        )
+        .map((shift) => {
+          const wish = wishByStaff.get(shift.staffId);
+          return {
+            id: shift.id,
+            startTime: shift.startTime,
+            endTime: shift.endTime,
+            wishTimeLabel: struckWishLabel(wish),
+            isRemote: shift.status === "remote",
+            staff:
+              workers.find((w) => w.id === shift.staffId) ??
+              state.staffList.find((w) => w.id === shift.staffId && w.status === "active"),
+          };
+        })
+        .filter((row): row is typeof row & { staff: NonNullable<typeof row.staff> } => Boolean(row.staff))
+        .sort((a, b) => {
+          if (a.startTime !== b.startTime) return a.startTime.localeCompare(b.startTime);
+          return getStaffDisplayName(a.staff).localeCompare(getStaffDisplayName(b.staff), "ja");
+        });
+    }
+
+    return fromWishes();
+  }, [
+    currentUser?.id,
+    dayWishes,
+    detailDate,
+    fallbackPublishedDates,
+    isWorkerView,
+    state.confirmedShifts,
+    state.desiredShifts,
+    state.staffList,
+    workers,
+  ]);
 
   const editable = isWorkerView;
   const timeOptions = useMemo(
@@ -371,14 +514,36 @@ export function WishCalendarPage() {
       <div>
         <h2 style={{ marginTop: 0 }}>{formatDateShort(selectedDate)}</h2>
         <p className="muted" style={{ marginBottom: 8 }}>
-          希望者：{dayWishes.length}人
+          {isWorkerView && fallbackPublishedDates.has(detailDate) ? "出勤" : "希望者"}：
+          {isWorkerView && fallbackPublishedDates.has(detailDate)
+            ? dayOthers.length +
+              (selectedDateDisplay.kind === "confirmed" &&
+              isAttendanceStatus(selectedDateDisplay.shift.status)
+                ? 1
+                : 0)
+            : dayWishes.length}
+          人
         </p>
         <div className="list" style={{ marginTop: 12 }}>
           {currentUser?.role === "worker" && (
             <div className="list-item self-row">
               <div className="self-summary">
-                <span className="self-name">{getStaffDisplayName(currentUser)}</span>
-                <span className={renderSelfTimeClassName()}>{renderSelfTimeLabel()}</span>
+                <span className="self-name">
+                  {getStaffDisplayName(currentUser)}
+                  {isRemoteDisplay(selectedDateDisplay, myWish) ? (
+                    <RemoteMark />
+                  ) : null}
+                </span>
+                <ShiftTimes
+                  timeLabel={renderSelfTimeLabel()}
+                  timeClassName={renderSelfTimeClassName()}
+                  wishTimeLabel={
+                    fallbackPublishedDates.has(detailDate) &&
+                    (selectedDateDisplay.kind === "confirmed" || selectedDateDisplay.kind === "rest")
+                      ? struckWishLabel(myWish)
+                      : null
+                  }
+                />
               </div>
               <span className="actions" style={{ marginTop: 0 }}>
                 <button
@@ -404,15 +569,20 @@ export function WishCalendarPage() {
               </span>
             </div>
           )}
-          {dayWishes
-            .filter(({ shift }) => shift.staffId !== currentUser?.id)
-            .map(({ shift, staff }) => (
-              <div key={shift.id} className="list-item wish-row">
-                <span>{getStaffDisplayName(staff)}</span>
-                <span>{formatTimeRange(shift.startTime, shift.endTime)}</span>
+          {dayOthers.map(({ id, staff, startTime, endTime, isRemote, wishTimeLabel }) => (
+              <div key={id} className="list-item wish-row">
+                <span className="wish-row-name">
+                  {getStaffDisplayName(staff)}
+                  {isRemote ? <RemoteMark /> : null}
+                </span>
+                <ShiftTimes
+                  timeLabel={formatTimeRange(startTime, endTime)}
+                  timeClassName={wishTimeLabel ? "published-time" : ""}
+                  wishTimeLabel={wishTimeLabel}
+                />
               </div>
             ))}
-          {currentUser?.role === "worker" && !myWish && dayWishes.length === 0 && (
+          {currentUser?.role === "worker" && !myWish && dayWishes.length === 0 && dayOthers.length === 0 && (
             <div className="muted">
               {selectedDateDisplay.kind === "rest" ? "休み" : "設定なし"}
             </div>

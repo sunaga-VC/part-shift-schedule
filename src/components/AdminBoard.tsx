@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, memo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, memo } from "react";
 import { CalendarNavToolbar } from "@/components/CalendarNavToolbar";
 import { Icons } from "@/components/icons";
 import { useShift } from "@/components/context/ShiftContext";
@@ -25,7 +25,7 @@ import {
   getGoalDepartmentLabel,
 } from "@/lib/shift/goal";
 import { getGoalMemosForDate } from "@/lib/shift/goalMemos";
-import { getShiftStatusRingColor, isAttendanceStatus } from "@/lib/shift/status";
+import { getShiftStatusRingColor } from "@/lib/shift/status";
 import {
   buildGoalBlockIconDisplays,
   buildGoalBlockIconKey,
@@ -244,14 +244,7 @@ type AdminGanttRowProps = {
   dragPreview: { startTime: string; endTime: string } | null;
   canOperate: boolean;
   weekConfirmedMinutes: number;
-  ganttDate: string;
-  onStatusChange: (
-    staffId: string,
-    date: string,
-    nextStatus: ConfirmedShift["status"],
-    desiredShift: DesiredShift | undefined,
-    confirmedShift: ConfirmedShift | undefined
-  ) => void;
+  onStatusChange: (staffId: string, nextStatus: ConfirmedShift["status"]) => void;
   onDragHandleDown: (
     desiredId: string,
     edge: "start" | "end",
@@ -269,7 +262,6 @@ const AdminGanttRow = memo(function AdminGanttRow({
   dragPreview,
   canOperate,
   weekConfirmedMinutes,
-  ganttDate,
   onStatusChange,
   onDragHandleDown,
 }: AdminGanttRowProps) {
@@ -306,13 +298,8 @@ const AdminGanttRow = memo(function AdminGanttRow({
             }
             onChange={(e) => {
               if (!canEditStatus) return;
-              onStatusChange(
-                staff.id,
-                ganttDate,
-                e.target.value as ConfirmedShift["status"],
-                desiredShift,
-                confirmedShift
-              );
+              onStatusChange(staff.id, e.target.value as ConfirmedShift["status"]);
+              e.currentTarget.blur();
             }}
             disabled={!canEditStatus}
           >
@@ -460,8 +447,6 @@ export function AdminBoard() {
     navigateToDate,
   } = useWorkCalendarNavigation();
   const [viewMode, setViewMode] = useState<"calendar" | "day" | "workers">("day");
-  const statusRank = (status: ConfirmedShift["status"]) =>
-    isAttendanceStatus(status) ? 0 : status === "adjusting" ? 1 : 2;
   const resolveShiftStatus = (
     confirmedShift: ConfirmedShift | undefined,
     desiredShift: (typeof state.desiredShifts)[number] | undefined,
@@ -472,7 +457,7 @@ export function AdminBoard() {
     desiredShift: (typeof state.desiredShifts)[number] | undefined
   ) => isAdminResubmissionPending(confirmedShift, desiredShift);
   const [selectedDate, setSelectedDate] = useState(defaultSelectedDateKey);
-  const ganttDate = useDeferredValue(selectedDate);
+  const ganttDate = selectedDate;
   const handleSelectCalendarDate = useCallback((date: string) => {
     setSelectedDate(date);
     setViewMode("day");
@@ -552,9 +537,9 @@ export function AdminBoard() {
           return { staff, desiredShift, confirmedShift, currentStatus };
         })
         .sort((a, b) => {
-          const statusDiff = statusRank(a.currentStatus) - statusRank(b.currentStatus);
-          if (statusDiff !== 0) return statusDiff;
-          return getStaffDisplayName(a.staff).localeCompare(getStaffDisplayName(b.staff));
+          const nameDiff = getStaffDisplayName(a.staff).localeCompare(getStaffDisplayName(b.staff), "ja");
+          if (nameDiff !== 0) return nameDiff;
+          return a.staff.id.localeCompare(b.staff.id);
         }),
     [activeWorkers, shiftsForGanttDate]
   );
@@ -1101,13 +1086,9 @@ export function AdminBoard() {
   };
 
   const handleGanttRowStatusChange = useCallback(
-    (
-      staffId: string,
-      date: string,
-      nextStatus: ConfirmedShift["status"],
-      desiredShift: DesiredShift | undefined,
-      confirmedShift: ConfirmedShift | undefined
-    ) => {
+    (staffId: string, nextStatus: ConfirmedShift["status"]) => {
+      const desiredShift = desiredShiftByDateStaff.get(`${selectedDate}:${staffId}`);
+      const confirmedShift = confirmedShiftByDateStaff.get(`${selectedDate}:${staffId}`);
       if (desiredShift) {
         setDesiredShiftStatus(desiredShift.id, nextStatus);
         return;
@@ -1116,9 +1097,16 @@ export function AdminBoard() {
         updateConfirmedShift(confirmedShift.id, { status: nextStatus });
         return;
       }
-      setStaffDayStatus(staffId, date, nextStatus);
+      setStaffDayStatus(staffId, selectedDate, nextStatus);
     },
-    [setDesiredShiftStatus, setStaffDayStatus, updateConfirmedShift]
+    [
+      confirmedShiftByDateStaff,
+      desiredShiftByDateStaff,
+      selectedDate,
+      setDesiredShiftStatus,
+      setStaffDayStatus,
+      updateConfirmedShift,
+    ]
   );
 
   const handleGanttDragHandleDown = useCallback(
@@ -1478,7 +1466,7 @@ export function AdminBoard() {
         </div>
       </section>
 
-      <div className={`department-sections-grid${ganttDate !== selectedDate ? " gantt-loading" : ""}`}>
+      <div className="department-sections-grid">
         {departmentSections.length === 0 ? (
           <section className="panel stack">
             <p style={{ margin: 0 }}>表示する所属がありません。</p>
@@ -1639,7 +1627,6 @@ export function AdminBoard() {
                             }
                             canOperate={canOperate}
                             weekConfirmedMinutes={ganttWeekMinutesForStaff(staff.id)}
-                            ganttDate={ganttDate}
                             onStatusChange={handleGanttRowStatusChange}
                             onDragHandleDown={handleGanttDragHandleDown}
                           />

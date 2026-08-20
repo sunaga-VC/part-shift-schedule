@@ -333,11 +333,12 @@ function buildShiftPersistenceSignature(snapshot: ShiftPersistenceSnapshot): str
     requiredShifts: [...snapshot.requiredShifts].sort((a, b) => a.date.localeCompare(b.date)),
     goalBlocksByDate,
     goalMemos: [...snapshot.goalMemos].sort((a, b) => a.id.localeCompare(b.id)),
+    workerPublishedDates: [...(snapshot.workerPublishedDates ?? [])].sort(),
   });
 }
 
 async function fetchShiftSnapshotFromApi(): Promise<ShiftPersistenceSnapshot | null> {
-  const response = await fetchWithAuth("/api/shifts", { credentials: "same-origin" });
+  const response = await fetchWithAuth("/api/shifts", { credentials: "same-origin", cache: "no-store" });
   if (!response.ok) {
     console.warn("GET /api/shifts failed", response.status);
     return null;
@@ -554,6 +555,15 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       shiftReloadPendingRef.current = false;
       void fetchShiftSnapshotFromApi().then((next) => {
         if (!next) return;
+        if (shiftPersistInFlightRef.current > 0 || shiftDragActiveRef.current) {
+          shiftReloadPendingRef.current = true;
+          return;
+        }
+        const localSignature = buildShiftPersistenceSignature(latestShiftSnapshotRef.current);
+        if (localSignature !== lastShiftPersistSignatureRef.current) {
+          shiftReloadPendingRef.current = true;
+          return;
+        }
         lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(next);
         setState((prev) => ({
           ...prev,
@@ -646,7 +656,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       if (lastShiftPersistSignatureRef.current === signature) return;
 
       shiftPersistInFlightRef.current += 1;
-      skipRemoteReloadUntilRef.current = Date.now() + 8000;
+      skipRemoteReloadUntilRef.current = Date.now() + (user.role === "worker" ? 1200 : 8000);
       try {
         const result = await persistSnapshotViaApi(user, snapshot);
         if (!result.ok) {
@@ -967,7 +977,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       const result = await persistSnapshotViaApi(currentUser, snapshot);
       if (!result.ok) return result;
       lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(snapshot);
-      skipRemoteReloadUntilRef.current = Date.now() + 8000;
+      skipRemoteReloadUntilRef.current = Date.now() + (currentUser.role === "worker" ? 1200 : 8000);
       return { ok: true };
     } finally {
       finishShiftPersist(currentUser);
@@ -1021,10 +1031,6 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       try {
         const next = await fetchShiftSnapshotFromApi();
         if (!next || cancelled) return;
-        const nextSignature = buildShiftPersistenceSignature(next);
-        const localSignature = buildShiftPersistenceSignature(latestShiftSnapshotRef.current);
-        if (nextSignature === localSignature) return;
-        lastShiftPersistSignatureRef.current = nextSignature;
         setState((prev) => {
           const isWorker =
             prev.staffList.find((staff) => staff.id === prev.currentUserId)?.role === "worker";
@@ -1034,10 +1040,17 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
                   new Set([...(prev.workerPublishedDates ?? []), ...(next.workerPublishedDates ?? [])])
                 ).sort()
               : next.workerPublishedDates;
-          return {
-            ...prev,
+          const applied = {
             ...next,
             workerPublishedDates: mergedPublishedDates,
+          };
+          const appliedSignature = buildShiftPersistenceSignature(applied);
+          const localSignature = buildShiftPersistenceSignature(latestShiftSnapshotRef.current);
+          if (appliedSignature === localSignature) return prev;
+          lastShiftPersistSignatureRef.current = appliedSignature;
+          return {
+            ...prev,
+            ...applied,
             homeMessages: prev.homeMessages,
             staffList: prev.staffList,
             departments: prev.departments,
@@ -1072,7 +1085,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     pollTimer = setInterval(() => {
       if (document.visibilityState !== "visible") return;
       scheduleReloadShiftSnapshot();
-    }, currentUserRoleForSync === "admin" ? 3000 : 8000);
+    }, currentUserRoleForSync === "admin" ? 3000 : 2500);
 
     void (async () => {
       try {
@@ -1080,7 +1093,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         channel = supabase.channel(`shift-state-sync-${currentUserIdForSync}`);
         const tables =
           currentUserRoleForSync === "worker"
-            ? (["desired_shifts", "confirmed_shifts"] as const)
+            ? (["desired_shifts", "confirmed_shifts", "shift_periods"] as const)
             : ([
                 "desired_shifts",
                 "confirmed_shifts",

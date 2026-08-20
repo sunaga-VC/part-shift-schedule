@@ -48,7 +48,10 @@ export async function GET() {
         workerTeam,
       });
     }
-    return NextResponse.json({ ok: true, snapshot: filteredSnapshot });
+    return NextResponse.json(
+      { ok: true, snapshot: filteredSnapshot },
+      { headers: { "Cache-Control": "no-store" } }
+    );
   } catch (error) {
     const message = errorMessage(error, "シフト情報の取得に失敗しました。");
     return NextResponse.json({ ok: false, message }, { status: 400 });

@@ -1109,13 +1109,16 @@ textarea {
 }
 
 .wish-calendar .day-cell {
-  min-height: 56px;
+  min-height: 76px;
   padding: 6px;
 }
 
 .wish-calendar .day-meta {
   margin-top: 2px;
   font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .calendar-legend-row {
@@ -1401,7 +1404,9 @@ textarea {
   font-weight: 700;
 }
 
-.wish-edited-time {
+.wish-edited-time,
+.wish-calendar .day-cell.published-date .wish-edited-time,
+.shift-time-main.wish-edited-time {
   color: #dc2626;
   font-weight: 700;
 }
@@ -1432,11 +1437,16 @@ textarea {
 
 .wish-row {
   justify-content: flex-start;
+  align-items: flex-start;
+}
+
+.wish-row .shift-time-stack {
+  margin-left: auto;
 }
 
 .self-summary {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: flex-start;
   gap: 12px;
   min-width: 0;
@@ -1447,6 +1457,67 @@ textarea {
 .self-time {
   font-size: 13px;
   font-weight: 700;
+}
+
+.shift-time-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  min-width: 0;
+  line-height: 1.15;
+}
+
+.shift-time-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.wish-struck-time {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+}
+
+.wish-calendar .day-meta .shift-time-stack {
+  align-items: flex-start;
+}
+
+.wish-calendar .day-meta .wish-struck-time {
+  font-size: 10px;
+}
+
+.self-name,
+.wish-row-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.remote-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  color: #1a7f37;
+  background: var(--status-confirmed-soft);
+  border: 1px dashed #34c759;
+  flex-shrink: 0;
+}
+
+.wish-calendar .day-meta .remote-mark {
+  width: 16px;
+  height: 16px;
+  font-size: 9px;
 }
 
 .single-line-item {
@@ -3834,7 +3905,7 @@ textarea.master-input,
   }
 
   .wish-calendar .day-cell {
-    min-height: 64px;
+    min-height: 78px;
   }
 
   .wish-calendar .day-meta {

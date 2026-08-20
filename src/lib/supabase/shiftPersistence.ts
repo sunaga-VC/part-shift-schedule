@@ -670,6 +670,42 @@ function isWorkerDatePublished(
   ).includes(date);
 }
 
+function getTeamWorkerIds(context: WorkerPublishContext): Set<string> {
+  const workers = context.staffList.filter((staff) => staff.role === "worker" && staff.status === "active");
+  if (context.workerTeam === "未設定") {
+    return new Set(
+      workers.filter((staff) => !context.knownDepartments.has(staff.team)).map((staff) => staff.id)
+    );
+  }
+  if (!context.workerTeam) return new Set([context.staffId]);
+  return new Set(workers.filter((staff) => staff.team === context.workerTeam).map((staff) => staff.id));
+}
+
+function normalizeOwnPublishedConfirmed(
+  shift: ConfirmedShift,
+  ownDesired: DesiredShift[],
+  snapshot: ShiftPersistenceSnapshot,
+  context: WorkerPublishContext,
+  publishStamp: string
+): ConfirmedShift {
+  const publishedForWorker = isWorkerDatePublished(snapshot, context, shift.date);
+  let next = shift;
+  if (!shift.publishedAt && publishedForWorker) {
+    next = { ...shift, publishedAt: shift.updatedAt ?? publishStamp };
+  }
+  if (
+    next.publishedAt &&
+    next.status === "adjusting" &&
+    !hasWishChangedAfterPublish(next, ownDesired.find((desired) => desired.date === shift.date))
+  ) {
+        next = {
+          ...next,
+          status: isRestConfirmedShift(next) ? "unconfirmed" : "confirmed",
+        };
+  }
+  return next;
+}
+
 function buildWorkerConfirmedShifts(
   snapshot: ShiftPersistenceSnapshot,
   context: WorkerPublishContext
@@ -677,40 +713,35 @@ function buildWorkerConfirmedShifts(
   const { staffId } = context;
   const publishStamp = snapshot.period.publishedAt ?? new Date().toISOString();
   const ownDesired = snapshot.desiredShifts.filter((shift) => shift.staffId === staffId);
-  const ownConfirmedRaw = snapshot.confirmedShifts.filter((shift) => shift.staffId === staffId);
+  const teamIds = getTeamWorkerIds(context);
 
-  return ownConfirmedRaw
-    .map((shift) => {
-      const publishedForWorker = isWorkerDatePublished(snapshot, context, shift.date);
-      let next = shift;
-      if (!shift.publishedAt && publishedForWorker) {
-        next = { ...shift, publishedAt: shift.updatedAt ?? publishStamp };
-      }
-      if (
-        next.publishedAt &&
-        next.status === "adjusting" &&
-        !hasWishChangedAfterPublish(next, ownDesired.find((desired) => desired.date === shift.date))
-      ) {
-        next = {
-          ...next,
-          status: isRestConfirmedShift(next) ? "unconfirmed" : "confirmed",
-        };
-      }
-      return next;
-    })
-    .filter((shift) => Boolean(shift.publishedAt))
-    .sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime));
+  const visible: ConfirmedShift[] = [];
+  for (const shift of snapshot.confirmedShifts) {
+    if (shift.staffId === staffId) {
+      const next = normalizeOwnPublishedConfirmed(shift, ownDesired, snapshot, context, publishStamp);
+      if (next.publishedAt) visible.push(next);
+      continue;
+    }
+    if (!shift.publishedAt) continue;
+    if (!teamIds.has(shift.staffId)) continue;
+    visible.push(shift);
+  }
+
+  return visible.sort((a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime) || a.staffId.localeCompare(b.staffId));
 }
 
-/** アルバイト向け: 自分の希望 + 所属で確定公開済みの確定シフト */
+/** アルバイト向け: 自分の希望 + 所属メンバーの希望 + 所属で確定公開済みの確定シフト */
 export function filterShiftSnapshotForWorker(
   snapshot: ShiftPersistenceSnapshot,
   context: WorkerPublishContext
 ): ShiftPersistenceSnapshot {
   const workerPublishedDates = buildWorkerPublishedDates(snapshot, context);
+  const teamIds = getTeamWorkerIds(context);
   return {
     ...snapshot,
-    desiredShifts: snapshot.desiredShifts.filter((shift) => shift.staffId === context.staffId),
+    desiredShifts: snapshot.desiredShifts.filter(
+      (shift) => shift.staffId === context.staffId || teamIds.has(shift.staffId)
+    ),
     confirmedShifts: buildWorkerConfirmedShifts(snapshot, context),
     workerPublishedDates,
   };

@@ -1,5 +1,6 @@
 import { getMondayOfWeek, getWeekDates } from "@/lib/shift/dates";
 import { isAttendanceStatus } from "@/lib/shift/status";
+import { normalizeDisplayTime } from "@/lib/shift/time";
 import type { ConfirmedShift, DesiredShift, ShiftPeriod, Staff } from "@/lib/shift/types";
 
 export function isPublishedWeekDate(period: ShiftPeriod, date: string): boolean {
@@ -174,6 +175,14 @@ export function isWorkerCalendarDatePublished(
   );
 }
 
+function isTimestampAfter(later: string | null | undefined, earlier: string | null | undefined): boolean {
+  if (!later || !earlier) return false;
+  const laterMs = Date.parse(later);
+  const earlierMs = Date.parse(earlier);
+  if (Number.isNaN(laterMs) || Number.isNaN(earlierMs)) return later > earlier;
+  return laterMs > earlierMs;
+}
+
 /** 確定公開後に、アルバイト本人が希望を変更したか */
 export function hasWishChangedAfterPublish(
   confirmed: ConfirmedShift | undefined,
@@ -184,11 +193,11 @@ export function hasWishChangedAfterPublish(
     if (isRestConfirmedShift(confirmed)) return false;
     return isAttendanceStatus(confirmed.status);
   }
-  if (desired.updatedAt <= confirmed.publishedAt) return false;
+  if (!isTimestampAfter(desired.updatedAt, confirmed.publishedAt)) return false;
   if (isRestConfirmedShift(confirmed)) return true;
   return (
-    desired.startTime !== confirmed.startTime ||
-    desired.endTime !== confirmed.endTime ||
+    normalizeDisplayTime(desired.startTime) !== normalizeDisplayTime(confirmed.startTime) ||
+    normalizeDisplayTime(desired.endTime) !== normalizeDisplayTime(confirmed.endTime) ||
     (desired.note ?? "") !== (confirmed.note ?? "")
   );
 }
@@ -202,7 +211,7 @@ export function needsRepublishAfterConfirm(
   desired: DesiredShift | undefined
 ): boolean {
   if (!confirmed?.publishedAt) return false;
-  if (confirmed.updatedAt > confirmed.publishedAt) return true;
+  if (isTimestampAfter(confirmed.updatedAt, confirmed.publishedAt)) return true;
   return hasWishChangedAfterPublish(confirmed, desired);
 }
 
@@ -271,9 +280,8 @@ export function resolveWorkerShiftDisplay(
   workerPublishedDates?: readonly string[]
 ): WorkerShiftDisplay {
   void period;
-  void workerPublishedDates;
-  void date;
-  const shiftPublished = Boolean(confirmed?.publishedAt);
+  const shiftPublished =
+    Boolean(confirmed?.publishedAt) || Boolean(workerPublishedDates?.includes(date));
   const pendingAfterPublish =
     shiftPublished && hasWishChangedAfterPublish(confirmed, desired);
   const unreviewed = hasUnreviewedWorkerWish(confirmed, desired);
@@ -311,12 +319,8 @@ export function getAdminShiftStatus(
   if (!confirmed && !desired) return "unconfirmed";
 
   if (confirmed?.publishedAt && needsRepublishAfterConfirm(confirmed, desired)) {
-    if (desired && hasWishChangedAfterPublish(confirmed, desired)) {
-      if (isAttendanceStatus(confirmed.status)) return confirmed.status;
-      return "adjusting";
-    }
     if (isAttendanceStatus(confirmed.status)) return confirmed.status;
-    if (isRestConfirmedShift(confirmed)) return "unconfirmed";
+    if (confirmed.status === "unconfirmed" || isRestConfirmedShift(confirmed)) return "unconfirmed";
     return "adjusting";
   }
 
@@ -355,7 +359,10 @@ export function resolveAdminShiftDisplay(
   options?: { currentStatus?: ConfirmedShift["status"] }
 ): ConfirmedShift | DesiredShift | undefined {
   const status = options?.currentStatus ?? getAdminShiftStatus(confirmed, desired);
-  if (status === "unconfirmed") return undefined;
+  if (status === "unconfirmed") {
+    if (desired && !isRestSentinelTime(desired.startTime, desired.endTime)) return desired;
+    return undefined;
+  }
   if (status === "adjusting") {
     if (confirmed && !isRestSentinelTime(confirmed.startTime, confirmed.endTime)) return confirmed;
     if (desired) return desired;
