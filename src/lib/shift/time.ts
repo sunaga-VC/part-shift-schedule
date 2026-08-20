@@ -57,6 +57,11 @@ export function formatTimeRange(startTime: string, endTime: string): string {
   return `${normalizeDisplayTime(startTime)}～${normalizeDisplayTime(endTime)}`;
 }
 
+/** 12:00 → 1200 のようにコロンなしで表示 */
+export function formatCompactTime(time: string): string {
+  return normalizeDisplayTime(time).replace(":", "");
+}
+
 export function formatShiftSummary(startTime: string, endTime: string, breakMinutes: number): string {
   const actualMinutes = Math.max(0, toMinutes(endTime) - toMinutes(startTime) - breakMinutes);
   return `${formatMinutes(actualMinutes)}（休憩${formatMinutes(breakMinutes)}）`;

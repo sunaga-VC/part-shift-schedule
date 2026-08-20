@@ -6,7 +6,7 @@ import { formatDateShort } from "@/lib/shift/dates";
 import { getGoalDepartmentLabel } from "@/lib/shift/goal";
 import { getStaffShiftStatus, resolveAdminShiftDisplay } from "@/lib/shift/publish-state";
 import { getShiftStatusLabel, isAttendanceStatus } from "@/lib/shift/status";
-import { formatMinutes, formatTimeRange, normalizeDisplayTime, toMinutes } from "@/lib/shift/time";
+import { formatCompactTime, formatMinutes, formatTimeRange, normalizeDisplayTime, toMinutes } from "@/lib/shift/time";
 import type { ConfirmedShift, DesiredShift, Staff } from "@/lib/shift/types";
 
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"] as const;
@@ -101,15 +101,27 @@ function DayGanttBlock({
         ) : (
           entries.map(({ staff, desiredShift, confirmedShift, currentStatus }) => {
             const shift = resolveAdminShiftDisplay(confirmedShift, desiredShift, { currentStatus });
+            const wishShift = desiredShift;
+            const showWishTimes = currentStatus === "adjusting" && Boolean(wishShift);
             return (
               <div key={`${date}-${staff.id}`} className="timeline-row timeline-row-gantt">
                 <div className="timeline-worker-name">
-                  <span
-                    className={`status-select timeline-status-select ${currentStatus}`}
-                    style={{ pointerEvents: "none" }}
-                  >
-                    {getShiftStatusLabel(currentStatus)}
-                  </span>
+                  {showWishTimes && wishShift ? (
+                    <span
+                      className={`status-select timeline-status-select ${currentStatus} timeline-status-wish-static`}
+                      style={{ pointerEvents: "none" }}
+                    >
+                      <span>{formatCompactTime(wishShift.startTime)}</span>
+                      <span>{formatCompactTime(wishShift.endTime)}</span>
+                    </span>
+                  ) : (
+                    <span
+                      className={`status-select timeline-status-select ${currentStatus}`}
+                      style={{ pointerEvents: "none" }}
+                    >
+                      {getShiftStatusLabel(currentStatus)}
+                    </span>
+                  )}
                   <div className="timeline-worker-meta day-summary-worker-meta">
                     <span className="day-summary-worker-name-row">
                       <span>{getStaffDisplayName(staff)}</span>

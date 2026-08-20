@@ -34,7 +34,7 @@ async function listAllAuthUsers(service: ServiceClient) {
 }
 
 /**
- * 正規5アカウントだけ Auth に残し、メール・パスワードを揃える。
+ * 正規アカウントだけ Auth に残し、メール・パスワードを揃える。
  * staff_profiles.email も loginEmail に更新する。
  */
 export async function resetCanonicalAuthAccounts(

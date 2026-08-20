@@ -45,7 +45,7 @@ import {
   resolveAdminShiftDisplay,
 } from "@/lib/shift/publish-state";
 import { buildWeeklyStaffSummary } from "@/lib/shift/summary";
-import { formatConfirmedWithDiff, formatMinutes, formatShiftSummary, formatTimeRange, normalizeDisplayTime, toMinutes } from "@/lib/shift/time";
+import { formatCompactTime, formatConfirmedWithDiff, formatMinutes, formatShiftSummary, formatTimeRange, normalizeDisplayTime, toMinutes, calcActualMinutes, calcBreakMinutes } from "@/lib/shift/time";
 import type { ConfirmedShift, DesiredShift, Staff } from "@/lib/shift/types";
 
 /** 在宅用: 時間帯の円弧だけを点線で描く（終了以降は描画しない） */
@@ -273,38 +273,55 @@ const AdminGanttRow = memo(function AdminGanttRow({
   onStatusChange,
   onDragHandleDown,
 }: AdminGanttRowProps) {
-  const editableDesired = desiredShift;
+  const editableBarId = desiredShift?.id ?? confirmedShift?.id;
   const displayShift = resolveAdminShiftDisplay(confirmedShift, desiredShift, {
     currentStatus,
   });
   const canEditStatus = canOperate;
-  const canEditTime = canOperate && currentStatus !== "unconfirmed" && Boolean(editableDesired);
+  const canEditTime = canOperate && currentStatus !== "unconfirmed" && Boolean(displayShift) && Boolean(editableBarId);
   const barStartTime = dragPreview?.startTime ?? displayShift?.startTime ?? "10:00";
   const barEndTime = dragPreview?.endTime ?? displayShift?.endTime ?? "18:00";
+
+  const wishStartTime = desiredShift?.startTime;
+  const wishEndTime = desiredShift?.endTime;
+  const showWishTimes = currentStatus === "adjusting" && Boolean(wishStartTime && wishEndTime);
 
   return (
     <div className="timeline-row timeline-row-gantt">
       <div className="timeline-worker-name">
-        <select
-          className={`status-select timeline-status-select ${currentStatus}`}
-          value={currentStatus}
-          onChange={(e) => {
-            if (!canEditStatus) return;
-            onStatusChange(
-              staff.id,
-              ganttDate,
-              e.target.value as ConfirmedShift["status"],
-              editableDesired,
-              confirmedShift
-            );
-          }}
-          disabled={!canEditStatus}
-        >
-          <option value="confirmed">出社</option>
-          <option value="remote">在宅</option>
-          <option value="adjusting">調整</option>
-          <option value="unconfirmed">休み</option>
-        </select>
+        <div className={`timeline-status-control${showWishTimes ? " has-wish-times" : ""}`}>
+          {showWishTimes && wishStartTime && wishEndTime ? (
+            <span className="timeline-status-wish-times" aria-hidden="true">
+              <span>{formatCompactTime(wishStartTime)}</span>
+              <span>{formatCompactTime(wishEndTime)}</span>
+            </span>
+          ) : null}
+          <select
+            className={`status-select timeline-status-select ${currentStatus}`}
+            value={currentStatus}
+            aria-label={
+              showWishTimes && wishStartTime && wishEndTime
+                ? `調整 ${formatCompactTime(wishStartTime)} ${formatCompactTime(wishEndTime)}`
+                : undefined
+            }
+            onChange={(e) => {
+              if (!canEditStatus) return;
+              onStatusChange(
+                staff.id,
+                ganttDate,
+                e.target.value as ConfirmedShift["status"],
+                desiredShift,
+                confirmedShift
+              );
+            }}
+            disabled={!canEditStatus}
+          >
+            <option value="confirmed">出社</option>
+            <option value="remote">在宅</option>
+            <option value="adjusting">調整</option>
+            <option value="unconfirmed">休み</option>
+          </select>
+        </div>
         <div className="timeline-worker-meta">
           <span className="timeline-worker-name-row">
             <span>{getStaffDisplayName(staff)}</span>
@@ -369,23 +386,23 @@ const AdminGanttRow = memo(function AdminGanttRow({
                 <span
                   className="gantt-handle start"
                   onPointerDown={(e) => {
-                    if (!editableDesired) return;
+                    if (!editableBarId) return;
                     e.preventDefault();
                     e.stopPropagation();
                     const track = e.currentTarget.closest(".timeline-track-gantt") as HTMLDivElement | null;
                     if (!track) return;
-                    onDragHandleDown(editableDesired.id, "start", track, barStartTime, barEndTime);
+                    onDragHandleDown(editableBarId, "start", track, barStartTime, barEndTime);
                   }}
                 />
                 <span
                   className="gantt-handle end"
                   onPointerDown={(e) => {
-                    if (!editableDesired) return;
+                    if (!editableBarId) return;
                     e.preventDefault();
                     e.stopPropagation();
                     const track = e.currentTarget.closest(".timeline-track-gantt") as HTMLDivElement | null;
                     if (!track) return;
-                    onDragHandleDown(editableDesired.id, "end", track, barStartTime, barEndTime);
+                    onDragHandleDown(editableBarId, "end", track, barStartTime, barEndTime);
                   }}
                 />
               </>
@@ -576,9 +593,47 @@ export function AdminBoard() {
     ? `${formatDateShort(selectedWeekDates[0])}～${formatDateShort(selectedWeekDates[selectedWeekDates.length - 1])}`
     : "";
   const selectedWeekLabel = selectedWeekTitle;
-  const selectedWeekSummaryMap = useMemo(
-    () => new Map(selectedWeekSummaries.map((summary) => [summary.staffId, summary])),
-    [selectedWeekSummaries]
+  const ganttWeekMinutesByStaff = useMemo(() => {
+    const totals = new Map<string, number>();
+    for (const staff of activeWorkers) {
+      let total = 0;
+      for (const date of selectedWeekDates) {
+        const desired = desiredShiftByDateStaff.get(`${date}:${staff.id}`);
+        const confirmed = confirmedShiftByDateStaff.get(`${date}:${staff.id}`);
+        const status = getAdminShiftStatus(confirmed, desired);
+        if (status === "unconfirmed") continue;
+        const display = resolveAdminShiftDisplay(confirmed, desired, { currentStatus: status });
+        if (!display) continue;
+        total += display.actualMinutes;
+      }
+      totals.set(staff.id, total);
+    }
+    return totals;
+  }, [activeWorkers, confirmedShiftByDateStaff, desiredShiftByDateStaff, selectedWeekDates]);
+
+  const ganttWeekMinutesForStaff = useCallback(
+    (staffId: string) => {
+      const base = ganttWeekMinutesByStaff.get(staffId) ?? 0;
+      if (!ganttDragPreview) return base;
+      const desired = desiredShiftByDateStaff.get(`${ganttDate}:${staffId}`);
+      const confirmed = confirmedShiftByDateStaff.get(`${ganttDate}:${staffId}`);
+      if (desired?.id !== ganttDragPreview.desiredId && confirmed?.id !== ganttDragPreview.desiredId) {
+        return base;
+      }
+      const status = getAdminShiftStatus(confirmed, desired);
+      const display = resolveAdminShiftDisplay(confirmed, desired, { currentStatus: status });
+      const previous = display?.actualMinutes ?? 0;
+      const breakMinutes = calcBreakMinutes(ganttDragPreview.startTime, ganttDragPreview.endTime);
+      const next = calcActualMinutes(ganttDragPreview.startTime, ganttDragPreview.endTime, breakMinutes);
+      return Math.max(0, base - previous + next);
+    },
+    [
+      confirmedShiftByDateStaff,
+      desiredShiftByDateStaff,
+      ganttDate,
+      ganttDragPreview,
+      ganttWeekMinutesByStaff,
+    ]
   );
   const selectedGoalBlocks = useMemo(
     () => getGoalBlocksForDate(state, ganttDate),
@@ -1576,14 +1631,14 @@ export function AdminBoard() {
                             confirmedShift={confirmedShift}
                             currentStatus={currentStatus}
                             dragPreview={
-                              ganttDragPreview && desiredShift?.id === ganttDragPreview.desiredId
+                              ganttDragPreview &&
+                              (desiredShift?.id === ganttDragPreview.desiredId ||
+                                confirmedShift?.id === ganttDragPreview.desiredId)
                                 ? ganttDragPreview
                                 : null
                             }
                             canOperate={canOperate}
-                            weekConfirmedMinutes={
-                              selectedWeekSummaryMap.get(staff.id)?.confirmedMinutes ?? 0
-                            }
+                            weekConfirmedMinutes={ganttWeekMinutesForStaff(staff.id)}
                             ganttDate={ganttDate}
                             onStatusChange={handleGanttRowStatusChange}
                             onDragHandleDown={handleGanttDragHandleDown}

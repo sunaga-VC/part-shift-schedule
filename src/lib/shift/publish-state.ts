@@ -34,12 +34,18 @@ export function isDepartmentWeekPublished(
   );
 }
 
+export const REST_SHIFT_START = "09:00";
+export const REST_SHIFT_END = "09:01";
+export const DEFAULT_ATTENDANCE_START = "10:00";
+export const DEFAULT_ATTENDANCE_END = "18:00";
+
+export function isRestSentinelTime(startTime: string, endTime: string): boolean {
+  return startTime === REST_SHIFT_START && endTime === REST_SHIFT_END;
+}
+
 export function isRestConfirmedShift(confirmed: ConfirmedShift): boolean {
   if (confirmed.status === "adjusting") return false;
-  return (
-    confirmed.status === "unconfirmed" ||
-    (confirmed.startTime === "09:00" && confirmed.endTime === "09:01")
-  );
+  return confirmed.status === "unconfirmed" || isRestSentinelTime(confirmed.startTime, confirmed.endTime);
 }
 
 /** 公開済みの確定シフトか（当該日の confirmed が公開されているか） */
@@ -319,6 +325,7 @@ export function getAdminShiftStatus(
   }
 
   if (!confirmed) return "unconfirmed";
+  if (isAttendanceStatus(confirmed.status)) return confirmed.status;
   if (isRestConfirmedShift(confirmed)) return "unconfirmed";
   return confirmed.status;
 }
@@ -341,7 +348,7 @@ export function getEffectiveStaffShiftStatus(
   return getAdminShiftStatus(confirmed, desired);
 }
 
-/** 管理者画面で表示・集計に使うシフト（再提出・調整中は希望を優先） */
+/** 管理者画面で表示・集計に使うシフト（調整中の棒は確定、元希望はバッジで別表示） */
 export function resolveAdminShiftDisplay(
   confirmed: ConfirmedShift | undefined,
   desired: DesiredShift | undefined,
@@ -349,7 +356,16 @@ export function resolveAdminShiftDisplay(
 ): ConfirmedShift | DesiredShift | undefined {
   const status = options?.currentStatus ?? getAdminShiftStatus(confirmed, desired);
   if (status === "unconfirmed") return undefined;
-  if (status === "adjusting") return desired;
+  if (status === "adjusting") {
+    if (confirmed && !isRestSentinelTime(confirmed.startTime, confirmed.endTime)) return confirmed;
+    if (desired) return desired;
+    return undefined;
+  }
+  if (isAttendanceStatus(status)) {
+    if (confirmed && !isRestSentinelTime(confirmed.startTime, confirmed.endTime)) return confirmed;
+    if (desired) return desired;
+    return confirmed;
+  }
   if (!confirmed || isRestConfirmedShift(confirmed)) return undefined;
   return confirmed;
 }

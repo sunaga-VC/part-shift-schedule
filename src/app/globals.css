@@ -2046,6 +2046,51 @@ textarea.master-input,
   display: none;
 }
 
+.timeline-status-control {
+  position: relative;
+  width: 52px;
+  min-width: 52px;
+}
+
+.timeline-status-control .timeline-status-select {
+  width: 100%;
+  min-width: 0;
+}
+
+.timeline-status-wish-times,
+.timeline-status-wish-static {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: 0.01em;
+  color: #92400e;
+}
+
+.timeline-status-wish-times {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.timeline-status-wish-static {
+  height: 32px;
+  padding: 2px 0;
+}
+
+.timeline-status-control.has-wish-times .timeline-status-select {
+  color: transparent;
+}
+
+.timeline-status-control.has-wish-times .timeline-status-select option {
+  color: #111827;
+}
+
 .board-split {
   display: grid;
   grid-template-columns: 112px 1fr;
@@ -3528,6 +3573,11 @@ textarea.master-input,
   font-weight: 600;
 }
 
+.admin-board-page .timeline-status-control {
+  width: 54px;
+  min-width: 54px;
+}
+
 .admin-board-page .timeline-worker-name {
   font-size: 14px;
   font-weight: 500;
@@ -3953,6 +4003,12 @@ textarea.master-input,
 
   .admin-board-page .timeline-worker-name {
     grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .admin-board-page .timeline-status-control,
+  .admin-board-page .timeline-status-select {
+    width: 100%;
+    min-width: 0;
   }
 
   .admin-board-page .week-summary-table {

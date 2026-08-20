@@ -34,18 +34,6 @@
       "managedDepartments": []
     },
     {
-      "loginEmail": "partsaiyo@vegecoop.co.jp",
-      "password": "part001",
-      "matchEmails": ["partsaiyo@vegecoop.co.jp"],
-      "lastName": "アルバイト管理者",
-      "firstName": "",
-      "role": "admin",
-      "adminPermission": "part_time_admin",
-      "departmentName": "第2チーム",
-      "managedDepartments": ["第2チーム", "第3チーム"],
-      "findByAdminPermission": "part_time_admin"
-    },
-    {
       "loginEmail": "sunaga@vegecoop.co.jp",
       "password": "pass002",
       "matchEmails": ["sunaga@vegegoop.co.jp", "sunaga@vegecoop.co.jp"],

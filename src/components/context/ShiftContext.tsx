@@ -24,7 +24,14 @@ import {
   canManageMaster as hasMasterPermission,
   normalizeAdminPermission,
 } from "@/lib/shift/permissions";
-import { hasWishChangedAfterPublish } from "@/lib/shift/publish-state";
+import {
+  DEFAULT_ATTENDANCE_END,
+  DEFAULT_ATTENDANCE_START,
+  hasWishChangedAfterPublish,
+  isRestSentinelTime,
+  REST_SHIFT_END,
+  REST_SHIFT_START,
+} from "@/lib/shift/publish-state";
 import { isAttendanceStatus, isPublishedConfirmedShift } from "@/lib/shift/status";
 import { DEFAULT_CONTRACT_RENEWAL_MONTHS } from "@/lib/shift/staffEmployment";
 import { calcActualMinutes, calcBreakMinutes, isValidTimeRange, normalizeDisplayTime } from "@/lib/shift/time";
@@ -163,6 +170,30 @@ function normalizeConfirmedShift(shift: ConfirmedShift): ConfirmedShift {
     endTime,
     breakMinutes,
     actualMinutes: calcActualMinutes(startTime, endTime, breakMinutes),
+  };
+}
+
+function buildWorkingShiftTimes(
+  desired?: Pick<DesiredShift, "startTime" | "endTime" | "note">,
+  existing?: Pick<ConfirmedShift, "startTime" | "endTime" | "note">
+) {
+  const source =
+    existing && !isRestSentinelTime(existing.startTime, existing.endTime)
+      ? existing
+      : desired && !isRestSentinelTime(desired.startTime, desired.endTime)
+        ? desired
+        : {
+            startTime: DEFAULT_ATTENDANCE_START,
+            endTime: DEFAULT_ATTENDANCE_END,
+            note: existing?.note || desired?.note || "",
+          };
+  const breakMinutes = calcBreakMinutes(source.startTime, source.endTime);
+  return {
+    startTime: source.startTime,
+    endTime: source.endTime,
+    breakMinutes,
+    actualMinutes: calcActualMinutes(source.startTime, source.endTime, breakMinutes),
+    note: source.note,
   };
 }
 
@@ -968,22 +999,32 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
   }, [ready, shiftPersistSignature, currentUserForSync, runShiftPersist]);
 
 
+  const currentUserIdForSync = currentUserForSync?.id;
+  const currentUserRoleForSync = currentUserForSync?.role;
+
   useEffect(() => {
-    if (!ready || !currentUserForSync) return;
+    if (!ready || !currentUserIdForSync || !currentUserRoleForSync) return;
     let cancelled = false;
     let supabase: ReturnType<typeof createClient> | null = null;
-    let channel: any = null;
+    let channel: ReturnType<ReturnType<typeof createClient>["channel"]> | null = null;
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+    const hasUnsavedShiftEdits = () =>
+      buildShiftPersistenceSignature(latestShiftSnapshotRef.current) !== lastShiftPersistSignatureRef.current;
 
     const reloadShiftSnapshot = async () => {
       if (cancelled) return;
-      if (shiftPersistInFlightRef.current > 0) {
+      if (shiftPersistInFlightRef.current > 0 || hasUnsavedShiftEdits() || shiftDragActiveRef.current) {
         shiftReloadPendingRef.current = true;
         return;
       }
       try {
         const next = await fetchShiftSnapshotFromApi();
         if (!next || cancelled) return;
-        lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(next);
+        const nextSignature = buildShiftPersistenceSignature(next);
+        const localSignature = buildShiftPersistenceSignature(latestShiftSnapshotRef.current);
+        if (nextSignature === localSignature) return;
+        lastShiftPersistSignatureRef.current = nextSignature;
         setState((prev) => {
           const isWorker =
             prev.staffList.find((staff) => staff.id === prev.currentUserId)?.role === "worker";
@@ -1009,23 +1050,36 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     };
 
     const scheduleReloadShiftSnapshot = () => {
-      if (Date.now() < skipRemoteReloadUntilRef.current) return;
-      if (shiftDragActiveRef.current) return;
       if (shiftReloadDebounceRef.current) {
         clearTimeout(shiftReloadDebounceRef.current);
       }
+      const skipWait = Math.max(0, skipRemoteReloadUntilRef.current - Date.now());
+      const delay = Math.max(400, skipWait);
       shiftReloadDebounceRef.current = setTimeout(() => {
         shiftReloadDebounceRef.current = null;
         void reloadShiftSnapshot();
-      }, 600);
+      }, delay);
     };
+
+    const onVisibilityOrFocus = () => {
+      if (document.visibilityState !== "visible") return;
+      scheduleReloadShiftSnapshot();
+    };
+
+    window.addEventListener("focus", onVisibilityOrFocus);
+    document.addEventListener("visibilitychange", onVisibilityOrFocus);
+
+    pollTimer = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      scheduleReloadShiftSnapshot();
+    }, currentUserRoleForSync === "admin" ? 3000 : 8000);
 
     void (async () => {
       try {
         supabase = createClient();
-        channel = supabase.channel("shift-state-sync");
+        channel = supabase.channel(`shift-state-sync-${currentUserIdForSync}`);
         const tables =
-          currentUserForSync.role === "worker"
+          currentUserRoleForSync === "worker"
             ? (["desired_shifts", "confirmed_shifts"] as const)
             : ([
                 "desired_shifts",
@@ -1042,7 +1096,13 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
             scheduleReloadShiftSnapshot
           );
         }
-        channel.subscribe();
+        channel.subscribe((status) => {
+          if (status === "SUBSCRIBED") {
+            scheduleReloadShiftSnapshot();
+          } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+            console.warn("Shift realtime subscription", status);
+          }
+        });
       } catch (error) {
         console.warn("Shift realtime subscription skipped", error);
       }
@@ -1050,6 +1110,11 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", onVisibilityOrFocus);
+      document.removeEventListener("visibilitychange", onVisibilityOrFocus);
+      if (pollTimer) {
+        clearInterval(pollTimer);
+      }
       if (shiftReloadDebounceRef.current) {
         clearTimeout(shiftReloadDebounceRef.current);
       }
@@ -1057,7 +1122,7 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         void supabase.removeChannel(channel);
       }
     };
-  }, [ready, currentUserForSync]);
+  }, [ready, currentUserIdForSync, currentUserRoleForSync]);
 
   useEffect(() => {
     const onHide = () => {
@@ -1820,46 +1885,50 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
 
     setState((prev) => {
       const desiredIndex = prev.desiredShifts.findIndex((s) => s.id === desiredId);
-      if (desiredIndex < 0) return prev;
-      const desired = prev.desiredShifts[desiredIndex];
-      const confirmedIndex = prev.confirmedShifts.findIndex(
-        (s) => s.staffId === desired.staffId && s.date === desired.date
-      );
+      const desired = desiredIndex >= 0 ? prev.desiredShifts[desiredIndex] : undefined;
+      const confirmedIndex = desired
+        ? prev.confirmedShifts.findIndex((s) => s.staffId === desired.staffId && s.date === desired.date)
+        : prev.confirmedShifts.findIndex((s) => s.id === desiredId);
       const existingConfirmed = confirmedIndex >= 0 ? prev.confirmedShifts[confirmedIndex] : undefined;
-      const shouldMarkAdjusting = existingConfirmed ? isAttendanceStatus(existingConfirmed.status) : false;
-
-      const nextDesiredShifts = prev.desiredShifts.slice();
-      nextDesiredShifts[desiredIndex] = {
-        ...desired,
-        startTime,
-        endTime,
-        breakMinutes,
-        actualMinutes,
-        updatedAt: now,
-      };
+      if (!desired && !existingConfirmed) return prev;
 
       let nextConfirmedShifts = prev.confirmedShifts;
-      if (confirmedIndex >= 0) {
+      if (existingConfirmed && confirmedIndex >= 0) {
         nextConfirmedShifts = prev.confirmedShifts.slice();
         nextConfirmedShifts[confirmedIndex] = {
-          ...existingConfirmed!,
+          ...existingConfirmed,
           startTime,
           endTime,
           breakMinutes,
           actualMinutes,
-          status: shouldMarkAdjusting ? ("adjusting" as const) : existingConfirmed!.status,
           updatedAt: now,
         };
+      } else if (desired) {
+        nextConfirmedShifts = [
+          ...prev.confirmedShifts,
+          {
+            id: `confirm-${desired.staffId}-${desired.date}`,
+            staffId: desired.staffId,
+            periodId: desired.periodId,
+            date: desired.date,
+            status: "adjusting",
+            startTime,
+            endTime,
+            breakMinutes,
+            actualMinutes,
+            note: desired.note,
+            adminNote: "",
+            publishedAt: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        ];
       }
 
       const nextState = {
         ...prev,
-        desiredShifts: nextDesiredShifts,
         confirmedShifts: nextConfirmedShifts,
-        period:
-          shouldMarkAdjusting || existingConfirmed
-            ? { ...prev.period, adjustmentStatus: "adjusting" as const, updatedAt: now }
-            : prev.period,
+        period: { ...prev.period, adjustmentStatus: "adjusting" as const, updatedAt: now },
       };
       latestShiftSnapshotRef.current = buildShiftPersistenceSnapshot(nextState);
       return nextState;
@@ -1915,22 +1984,23 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       }
 
       if (existing) {
+        const workingTimes = buildWorkingShiftTimes(desired, existing);
         const updatedConfirmed: ConfirmedShift = isAttendanceStatus(status)
           ? {
               ...existing,
               status,
-              startTime: desired.startTime,
-              endTime: desired.endTime,
-              breakMinutes: desired.breakMinutes,
-              actualMinutes: desired.actualMinutes,
-              note: desired.note,
+              startTime: workingTimes.startTime,
+              endTime: workingTimes.endTime,
+              breakMinutes: workingTimes.breakMinutes,
+              actualMinutes: workingTimes.actualMinutes,
+              note: workingTimes.note,
               updatedAt: now,
             }
           : {
               ...existing,
               status,
-              startTime: "09:00",
-              endTime: "09:01",
+              startTime: REST_SHIFT_START,
+              endTime: REST_SHIFT_END,
               breakMinutes: 0,
               actualMinutes: 0,
               updatedAt: now,
@@ -1946,17 +2016,18 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         return nextState;
       }
 
+      const workingTimes = buildWorkingShiftTimes(desired);
       const created: ConfirmedShift = {
         id: `confirm-${desired.staffId}-${desired.date}`,
         staffId: desired.staffId,
         periodId: desired.periodId,
         date: desired.date,
         status,
-        startTime: isAttendanceStatus(status) ? desired.startTime : "09:00",
-        endTime: isAttendanceStatus(status) ? desired.endTime : "09:01",
-        breakMinutes: isAttendanceStatus(status) ? desired.breakMinutes : 0,
-        actualMinutes: isAttendanceStatus(status) ? desired.actualMinutes : 0,
-        note: isAttendanceStatus(status) ? desired.note : "",
+        startTime: isAttendanceStatus(status) ? workingTimes.startTime : REST_SHIFT_START,
+        endTime: isAttendanceStatus(status) ? workingTimes.endTime : REST_SHIFT_END,
+        breakMinutes: isAttendanceStatus(status) ? workingTimes.breakMinutes : 0,
+        actualMinutes: isAttendanceStatus(status) ? workingTimes.actualMinutes : 0,
+        note: isAttendanceStatus(status) ? workingTimes.note : "",
         adminNote: "",
         publishedAt: null,
         createdAt: now,
@@ -1986,10 +2057,11 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       const existing = prev.confirmedShifts.find((shift) => shift.staffId === staffId && shift.date === date);
       const now = nowIso();
       const isRest = status === "unconfirmed";
-      const startTime = isRest ? "09:00" : existing?.startTime ?? "10:00";
-      const endTime = isRest ? "09:01" : existing?.endTime ?? "18:00";
-      const breakMinutes = isRest ? 0 : calcBreakMinutes(startTime, endTime);
-      const actualMinutes = isRest ? 0 : calcActualMinutes(startTime, endTime, breakMinutes);
+      const workingTimes = buildWorkingShiftTimes(desired, existing);
+      const startTime = isRest ? REST_SHIFT_START : workingTimes.startTime;
+      const endTime = isRest ? REST_SHIFT_END : workingTimes.endTime;
+      const breakMinutes = isRest ? 0 : workingTimes.breakMinutes;
+      const actualMinutes = isRest ? 0 : workingTimes.actualMinutes;
 
       if (existing) {
         const nextState = {
@@ -2050,13 +2122,28 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
           ...prev,
           confirmedShifts: prev.confirmedShifts.map((s) => {
             if (s.id !== id) return s;
-            const startTime = patch.startTime ?? s.startTime;
-            const endTime = patch.endTime ?? s.endTime;
+            const nextStatus = (patch.status ?? s.status) as ConfirmedShift["status"];
+            let startTime = patch.startTime ?? s.startTime;
+            let endTime = patch.endTime ?? s.endTime;
+            if (patch.status === "unconfirmed" && patch.startTime == null && patch.endTime == null) {
+              startTime = REST_SHIFT_START;
+              endTime = REST_SHIFT_END;
+            } else if (
+              patch.status &&
+              isAttendanceStatus(nextStatus) &&
+              patch.startTime == null &&
+              patch.endTime == null &&
+              isRestSentinelTime(startTime, endTime)
+            ) {
+              const workingTimes = buildWorkingShiftTimes(undefined, s);
+              startTime = workingTimes.startTime;
+              endTime = workingTimes.endTime;
+            }
             const breakMinutes = calcBreakMinutes(startTime, endTime);
             return {
               ...s,
               ...patch,
-              status: (patch.status ?? s.status) as ConfirmedShift["status"],
+              status: nextStatus,
               startTime,
               endTime,
               breakMinutes,
