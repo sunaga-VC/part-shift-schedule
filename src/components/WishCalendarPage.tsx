@@ -184,31 +184,27 @@ export function WishCalendarPage() {
     return Array.from(new Set([...(workerPublishedDates ?? []), ...stickyPublishedDates])).sort();
   }, [isWorkerView, workerPublishedDates, stickyPublishedDates]);
   const workerPublishedDateSet = useMemo(() => new Set(effectiveWorkerPublishedDates), [effectiveWorkerPublishedDates]);
-  const fallbackPublishedDates = useMemo(
-    () =>
-      isWorkerView
-        ? workerPublishedDateSet
-        : new Set(
-            computeWorkerPublishedDates(
-              state.period,
-              state.staffList,
-              state.confirmedShifts,
-              currentUser?.id ?? "",
-              currentUser?.team ?? "",
-              { knownDepartments }
-            )
-          ),
-    [
-      currentUser?.id,
-      currentUser?.team,
-      isWorkerView,
-      knownDepartments,
-      state.confirmedShifts,
+  const fallbackPublishedDates = useMemo(() => {
+    const computed = computeWorkerPublishedDates(
       state.period,
       state.staffList,
-      workerPublishedDateSet,
-    ]
-  );
+      state.confirmedShifts,
+      currentUser?.id ?? "",
+      currentUser?.team ?? "",
+      { knownDepartments }
+    );
+    if (!isWorkerView) return new Set(computed);
+    return new Set([...computed, ...workerPublishedDateSet]);
+  }, [
+    currentUser?.id,
+    currentUser?.team,
+    isWorkerView,
+    knownDepartments,
+    state.confirmedShifts,
+    state.period,
+    state.staffList,
+    workerPublishedDateSet,
+  ]);
 
   const calendarDates = useMemo(() => weekGroups.flat(), [weekGroups]);
   const workerCalendarCells = useMemo(() => {

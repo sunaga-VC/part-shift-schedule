@@ -798,7 +798,7 @@ export async function persistWorkerDesiredShiftsToSupabase(
   staffId: string
 ): Promise<string> {
   const { periodId } = await resolveCanonicalPeriod(supabase, snapshot);
-  const ownDesired = snapshot.desiredShifts.filter((shift) => shift.staffId === staffId);
+  const ownDesired = snapshot.desiredShifts.map((shift) => ({ ...shift, staffId }));
   const desiredDates = new Set(ownDesired.map((shift) => shift.date));
 
   const { data: existingRows, error: existingError } = await supabase

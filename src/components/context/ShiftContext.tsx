@@ -320,6 +320,60 @@ function buildShiftPersistenceSnapshot(state: AppState): ShiftPersistenceSnapsho
   };
 }
 
+function mergeWorkerPublishedDates(
+  prev: readonly string[] | undefined,
+  next: readonly string[] | undefined
+): string[] | undefined {
+  if (!prev?.length) return next ? [...next] : next;
+  if (!next?.length) return [...prev];
+  return Array.from(new Set([...prev, ...next])).sort();
+}
+
+function remoteMissingOwnDesiredDates(
+  local: ShiftPersistenceSnapshot,
+  remote: ShiftPersistenceSnapshot,
+  staffId: string
+): boolean {
+  const remoteDates = new Set(
+    remote.desiredShifts.filter((shift) => shift.staffId === staffId).map((shift) => shift.date)
+  );
+  return local.desiredShifts.some((shift) => shift.staffId === staffId && !remoteDates.has(shift.date));
+}
+
+function mergeFetchedShiftSnapshot(
+  prev: AppState,
+  remote: ShiftPersistenceSnapshot,
+  localSnapshot: ShiftPersistenceSnapshot
+): AppState | null {
+  const isWorker = prev.staffList.find((staff) => staff.id === prev.currentUserId)?.role === "worker";
+  const mergedPublishedDates = isWorker
+    ? mergeWorkerPublishedDates(prev.workerPublishedDates, remote.workerPublishedDates)
+    : remote.workerPublishedDates;
+  const applied: ShiftPersistenceSnapshot = {
+    ...remote,
+    workerPublishedDates: mergedPublishedDates,
+  };
+  if (isWorker && remoteMissingOwnDesiredDates(localSnapshot, applied, prev.currentUserId)) {
+    const prevDates = prev.workerPublishedDates ?? [];
+    const nextDates = mergedPublishedDates ?? [];
+    if (prevDates.length === nextDates.length && prevDates.every((date, index) => date === nextDates[index])) {
+      return null;
+    }
+    return { ...prev, workerPublishedDates: mergedPublishedDates };
+  }
+  const appliedSignature = buildShiftPersistenceSignature(applied);
+  const localSignature = buildShiftPersistenceSignature(localSnapshot);
+  if (appliedSignature === localSignature) return null;
+  return {
+    ...prev,
+    ...applied,
+    homeMessages: prev.homeMessages,
+    staffList: prev.staffList,
+    departments: prev.departments,
+    currentUserId: prev.currentUserId,
+  };
+}
+
 function buildShiftPersistenceSignature(snapshot: ShiftPersistenceSnapshot): string {
   const goalBlocksByDate = Object.fromEntries(
     Object.entries(snapshot.goalBlocksByDate)
@@ -553,26 +607,28 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
     shiftPersistInFlightRef.current = Math.max(0, shiftPersistInFlightRef.current - 1);
     if (shiftPersistInFlightRef.current === 0 && shiftReloadPendingRef.current) {
       shiftReloadPendingRef.current = false;
-      void fetchShiftSnapshotFromApi().then((next) => {
-        if (!next) return;
-        if (shiftPersistInFlightRef.current > 0 || shiftDragActiveRef.current) {
-          shiftReloadPendingRef.current = true;
-          return;
-        }
-        const localSignature = buildShiftPersistenceSignature(latestShiftSnapshotRef.current);
-        if (localSignature !== lastShiftPersistSignatureRef.current) {
-          shiftReloadPendingRef.current = true;
-          return;
-        }
-        lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(next);
-        setState((prev) => ({
-          ...prev,
-          ...next,
-          staffList: prev.staffList,
-          departments: prev.departments,
-          currentUserId: prev.currentUserId,
-        }));
-      });
+      if (user?.role !== "worker") {
+        void fetchShiftSnapshotFromApi().then((next) => {
+          if (!next) return;
+          if (shiftPersistInFlightRef.current > 0 || shiftDragActiveRef.current) {
+            shiftReloadPendingRef.current = true;
+            return;
+          }
+          const localSnapshot = latestShiftSnapshotRef.current;
+          if (buildShiftPersistenceSignature(localSnapshot) !== lastShiftPersistSignatureRef.current) {
+            shiftReloadPendingRef.current = true;
+            return;
+          }
+          setState((prev) => {
+            const merged = mergeFetchedShiftSnapshot(prev, next, localSnapshot);
+            if (!merged) return prev;
+            lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(
+              buildShiftPersistenceSnapshot(merged)
+            );
+            return merged;
+          });
+        });
+      }
     }
     if (shiftPersistInFlightRef.current === 0 && shiftPersistQueuedRef.current && user) {
       shiftPersistQueuedRef.current = false;
@@ -966,18 +1022,24 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
       shiftPersistDebounceRef.current = null;
     }
 
-    const snapshot = latestShiftSnapshotRef.current;
-    if (shiftPersistInFlightRef.current > 0) {
-      shiftPersistQueuedRef.current = true;
-      return { ok: true };
+    const startedAt = Date.now();
+    while (shiftPersistInFlightRef.current > 0) {
+      if (Date.now() - startedAt > 12000) {
+        return { ok: false, message: "保存が混み合っています。もう一度お試しください。" };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 40));
     }
+
+    const snapshot = latestShiftSnapshotRef.current;
+    const signature = buildShiftPersistenceSignature(snapshot);
+    if (lastShiftPersistSignatureRef.current === signature) return { ok: true };
 
     shiftPersistInFlightRef.current += 1;
     try {
       const result = await persistSnapshotViaApi(currentUser, snapshot);
       if (!result.ok) return result;
-      lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(snapshot);
-      skipRemoteReloadUntilRef.current = Date.now() + (currentUser.role === "worker" ? 1200 : 8000);
+      lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(latestShiftSnapshotRef.current);
+      skipRemoteReloadUntilRef.current = Date.now() + (currentUser.role === "worker" ? 1500 : 8000);
       return { ok: true };
     } finally {
       finishShiftPersist(currentUser);
@@ -1032,30 +1094,12 @@ export function ShiftProvider({ children }: { children: ReactNode }) {
         const next = await fetchShiftSnapshotFromApi();
         if (!next || cancelled) return;
         setState((prev) => {
-          const isWorker =
-            prev.staffList.find((staff) => staff.id === prev.currentUserId)?.role === "worker";
-          const mergedPublishedDates =
-            isWorker && (prev.workerPublishedDates?.length || next.workerPublishedDates?.length)
-              ? Array.from(
-                  new Set([...(prev.workerPublishedDates ?? []), ...(next.workerPublishedDates ?? [])])
-                ).sort()
-              : next.workerPublishedDates;
-          const applied = {
-            ...next,
-            workerPublishedDates: mergedPublishedDates,
-          };
-          const appliedSignature = buildShiftPersistenceSignature(applied);
-          const localSignature = buildShiftPersistenceSignature(latestShiftSnapshotRef.current);
-          if (appliedSignature === localSignature) return prev;
-          lastShiftPersistSignatureRef.current = appliedSignature;
-          return {
-            ...prev,
-            ...applied,
-            homeMessages: prev.homeMessages,
-            staffList: prev.staffList,
-            departments: prev.departments,
-            currentUserId: prev.currentUserId,
-          };
+          const merged = mergeFetchedShiftSnapshot(prev, next, latestShiftSnapshotRef.current);
+          if (!merged) return prev;
+          lastShiftPersistSignatureRef.current = buildShiftPersistenceSignature(
+            buildShiftPersistenceSnapshot(merged)
+          );
+          return merged;
         });
       } catch (error) {
         console.warn("Shift snapshot reload skipped", error);

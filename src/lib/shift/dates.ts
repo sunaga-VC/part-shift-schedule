@@ -13,9 +13,9 @@ export function toDateKey(date: Date): string {
 }
 
 export function addDays(dateKey: string, days: number): string {
-  const cursor = parseDate(dateKey);
-  cursor.setDate(cursor.getDate() + days);
-  return toDateKeyJst(cursor);
+  const utcMs = Date.parse(`${dateKey}T00:00:00+09:00`);
+  if (Number.isNaN(utcMs)) return dateKey;
+  return toDateKeyJst(new Date(utcMs + days * 24 * 60 * 60 * 1000));
 }
 
 export function addMonthsToDateKey(dateKey: string, months: number): string {
@@ -87,18 +87,10 @@ export function nowIso(): string {
   return new Date().toISOString();
 }
 
-/** 月曜始まりの平日5日分 */
+/** 指定日が属する週の平日（月〜金）。JST 基準で、サーバー TZ に依存しない */
 export function getWeekDates(startDate: string): string[] {
-  const result: string[] = [];
-  const cursor = parseDate(startDate);
-  while (result.length < 5) {
-    const day = cursor.getDay();
-    if (day !== 0 && day !== 6) {
-      result.push(toDateKey(cursor));
-    }
-    cursor.setDate(cursor.getDate() + 1);
-  }
-  return result;
+  const monday = getMondayOfWeek(startDate);
+  return [0, 1, 2, 3, 4].map((offset) => addDays(monday, offset));
 }
 
 /** 指定日が属する週の月曜日（JST） */
